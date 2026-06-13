@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bud Overlay</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      user-select: none;
+      -webkit-app-region: no-drag;
+    }
+
+    /* --- Companion Cursor --- */
+    #cursor {
+      position: fixed;
+      width: 28px;
+      height: 28px;
+      pointer-events: none;
+      z-index: 1000;
+      transition: opacity 0.3s ease;
+      filter: drop-shadow(0 2px 8px rgba(66, 133, 244, 0.4));
+    }
+
+    #cursor svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* --- Response Bubble --- */
+    #response-bubble {
+      position: fixed;
+      bottom: 90px;
+      right: 40px;
+      max-width: 400px;
+      padding: 16px 20px;
+      background: #000000;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 12px;
+      color: #ffffff;
+      font-size: 13px;
+      line-height: 1.6;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: opacity 0.3s ease, transform 0.3s ease;
+      z-index: 999;
+      pointer-events: none;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+    }
+
+    #response-bubble.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* --- Spinner (processing) --- */
+    #spinner {
+      position: fixed;
+      bottom: 40px;
+      right: 40px;
+      width: 28px;
+      height: 28px;
+      border: 2px solid rgba(255, 255, 255, 0.1);
+      border-top: 2px solid #ffffff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+      z-index: 999;
+      pointer-events: none;
+    }
+
+    #spinner.active {
+      opacity: 1;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <!-- Companion Cursor -->
+  <div id="cursor">
+    <svg viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M4 4L24 14L14 16L10 24L4 4Z" fill="#4285F4" stroke="#fff" stroke-width="1.5"/>
+    </svg>
+  </div>
+
+  <!-- Processing Spinner -->
+  <div id="spinner"></div>
+
+  <!-- Response Text Bubble -->
+  <div id="response-bubble"></div>
+
+  <!-- Agent Annotations -->
+  <div id="annotations" style="position:fixed; inset:0; pointer-events:none; z-index:900;"></div>
+
+  <script src="annotationRenderer.js"></script>
+  <script>
+    const cursor = document.getElementById('cursor');
+    const spinner = document.getElementById('spinner');
+    const responseBubble = document.getElementById('response-bubble');
+
+    document.addEventListener('mousemove', (e) => {
+      cursor.style.left = e.clientX + 'px';
+      cursor.style.top = e.clientY + 'px';
+    });
+
+    let currentAudio = null;
+
+    if (window.budAPI) {
+      window.budAPI.onPushToTalkStart(() => {
+        spinner.classList.remove('active');
+        responseBubble.classList.remove('visible');
+        if (currentAudio) {
+          currentAudio.pause();
+          URL.revokeObjectURL(currentAudio.src);
+          currentAudio = null;
+          window.budAPI.audioPlaybackEnded();
+        }
+      });
+
+      window.budAPI.onPushToTalkEnd(() => {
+        spinner.classList.add('active');
+      });
+
+      window.budAPI.onStateChange((state) => {
+        spinner.classList.remove('active');
+
+        switch (state) {
+          case 'processing':
+            spinner.classList.add('active');
+            break;
+
+          case 'responding':
+            if (currentAudio) {
+              currentAudio.pause();
+              URL.revokeObjectURL(currentAudio.src);
+              currentAudio = null;
+              window.budAPI.audioPlaybackEnded();
+            }
+            break;
+        }
+      });
+
+      window.budAPI.onResponse((text) => {
+        responseBubble.textContent = text;
+        responseBubble.classList.add('visible');
+        spinner.classList.remove('active');
+        setTimeout(() => {
+          responseBubble.classList.remove('visible');
+        }, 10000);
+      });
+
+      let animationFrameId = null;
+
+      window.budAPI.onPointTo((data) => {
+        // Cancel any existing animation
+        if (animationFrameId) {
+          cancelAnimationFrame(animationFrameId);
+        }
+
+        // 1. Get current position
+        const rect = cursor.getBoundingClientRect();
+        const startX = rect.left;
+        const startY = rect.top;
+
+        const endX = data.x;
+        const endY = data.y;
+
+        // 2. Calculate control point for quadratic Bezier (curve upward/leftward)
+        const midX = (startX + endX) / 2;
+        const midY = (startY + endY) / 2;
+
+        const dx = endX - startX;
+        const dy = endY - startY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        // Perpendicular normal vector (pointing upward/leftward)
+        const nx = -dy / (distance || 1);
+        const ny = dx / (distance || 1);
+
+        // Control point offset: 25% of the distance perpendicular
+        const offset = distance * 0.25;
+        const ctrlX = midX + nx * offset;
+        const ctrlY = midY + ny * offset;
+
+        // 3. Animation loop (800ms duration)
+        const duration = 800;
+        const startTime = performance.now();
+
+        // Easing function: easeInOutCubic
+        function ease(t) {
+          return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        }
+
+        function animate(now) {
+          const elapsed = now - startTime;
+          const progress = Math.min(elapsed / duration, 1);
+          const t = ease(progress);
+
+          // Quadratic Bezier interpolation
+          const u = 1 - t;
+          const x = u * u * startX + 2 * u * t * ctrlX + t * t * endX;
+          const y = u * u * startY + 2 * t * u * ctrlY + t * t * endY;
+
+          cursor.style.left = x + 'px';
+          cursor.style.top = y + 'px';
+
+          // Rotate cursor to point along flight direction (offset by 45deg to match cursor SVG)
+          const tx = 2 * u * (ctrlX - startX) + 2 * t * (endX - ctrlX);
+          const ty = 2 * u * (ctrlY - startY) + 2 * t * (endY - ctrlY);
+          const angle = Math.atan2(ty, tx) * (180 / Math.PI) + 45;
+          cursor.style.transform = `rotate(${angle}deg)`;
+
+          if (progress < 1) {
+            animationFrameId = requestAnimationFrame(animate);
+          } else {
+            // Reset rotation when finished
+            cursor.style.transform = 'none';
+          }
+        }
+
+        animationFrameId = requestAnimationFrame(animate);
+      });
+
+      window.budAPI.onToggleCursor((enabled) => {
+        cursor.style.display = enabled ? 'block' : 'none';
+      });
+
+      // Get initial cursor visibility state
+      window.budAPI.getStatus().then((status) => {
+        if (status && status.settings) {
+          cursor.style.display = status.settings.cursorEnabled ? 'block' : 'none';
+        }
+      });
+
+      // --- Audio Playback (TTS) ---
+      window.budAPI.onPlayAudio((base64) => {
+        try {
+          // Convert base64 WAV to blob URL and play
+          const binaryString = atob(base64);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          const blob = new Blob([bytes], { type: 'audio/wav' });
+          const url = URL.createObjectURL(blob);
+
+          if (currentAudio) {
+            currentAudio.pause();
+            URL.revokeObjectURL(currentAudio.src);
+          }
+
+          currentAudio = new Audio(url);
+          currentAudio.onended = () => {
+            URL.revokeObjectURL(url);
+            currentAudio = null;
+            window.budAPI.audioPlaybackEnded();
+          };
+          currentAudio.onerror = (err) => {
+            console.error('Audio playback error:', err);
+            URL.revokeObjectURL(url);
+            currentAudio = null;
+            window.budAPI.audioPlaybackEnded();
+          };
+          currentAudio.play().catch(err => {
+            console.error('Audio playback failed to start (e.g. autoplay blocked):', err);
+            URL.revokeObjectURL(url);
+            currentAudio = null;
+            window.budAPI.audioPlaybackEnded();
+          });
+        } catch (err) {
+          console.error('Failed to play audio:', err);
+          window.budAPI.audioPlaybackEnded();
+        }
+      });
+
+      window.budAPI.onStopAudio(() => {
+        if (currentAudio) {
+          currentAudio.pause();
+          URL.revokeObjectURL(currentAudio.src);
+          currentAudio = null;
+          window.budAPI.audioPlaybackEnded();
+        }
+      });
+    }
+  </script>
+</body>
+</html>
