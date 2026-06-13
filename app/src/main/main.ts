@@ -228,8 +228,8 @@ app.whenReady().then(async () => {
         console.log(`⚠️ Realtime fallback triggered: ${reason}`);
       },
     });
-    realtimeVoiceManager.on('response.created', () => {
-      annotationController.resetLifecycle();
+    realtimeVoiceManager.on('speech.started', () => {
+      annotationController.clearAnnotations();
     });
 
     realtimeVoiceManager.on('interruption', () => {

@@ -88,6 +88,7 @@ export class RealtimeVoiceManager extends EventEmitter {
     this.session.on('speech.started', () => {
       console.log('🎤 Speech detected');
       this.setVoiceState('speech-detected');
+      this.emit('speech.started');
 
       if (this.isResponseActive || this.pendingToolCalls > 0) {
         console.log('🎤 User interrupted — stopping playback');
