@@ -392,5 +392,6 @@ export class RealtimeVoiceManager extends EventEmitter {
     this.session.destroy();
     this.toolBridge.clear();
     ipcMain.removeHandler('realtime-webrtc-send-event');
+    this.removeAllListeners();
   }
 }
