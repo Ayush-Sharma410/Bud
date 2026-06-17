@@ -58,6 +58,23 @@ contextBridge.exposeInMainWorld('budAPI', {
   // Renderer → main: report playback state
   audioPlaybackEnded: () => ipcRenderer.send('audio-playback-ended'),
 
+  // --- Cartesia Realtime ---
+  onCartesiaStartCapture: (callback: () => void) => {
+    ipcRenderer.on('cartesia-start-capture', callback);
+  },
+  onCartesiaStopCapture: (callback: () => void) => {
+    ipcRenderer.on('cartesia-stop-capture', callback);
+  },
+  onCartesiaMute: (callback: (muted: boolean) => void) => {
+    ipcRenderer.on('cartesia-mute', (_event, muted) => callback(muted));
+  },
+  onCartesiaTTSAudio: (callback: (event: { contextId: string; base64Audio: string; done: boolean }) => void) => {
+    ipcRenderer.on('cartesia-tts-audio', (_event, event) => callback(event));
+  },
+  onCartesiaTTSStop: (callback: () => void) => {
+    ipcRenderer.on('cartesia-tts-stop', callback);
+  },
+
   // --- Event listeners (overlay) ---
   onPushToTalkStart: (callback: () => void) => {
     ipcRenderer.on('ptt-start', callback);
@@ -120,6 +137,8 @@ contextBridge.exposeInMainWorld('budAPI', {
   getRealtimeState: () => ipcRenderer.invoke('get-realtime-state'),
   sendRealtimeContext: (text?: string, images?: Array<{ dataUrl: string; mediaType: string }>) =>
     ipcRenderer.send('send-realtime-context', { text, images }),
+  saveStagedFile: (file: { name: string; mediaType: string; base64: string }) =>
+    ipcRenderer.invoke('save-staged-file', file),
   onRealtimeTranscript: (callback: (transcript: string) => void) => {
     ipcRenderer.on('realtime-transcript', (_event, transcript) => callback(transcript));
   },

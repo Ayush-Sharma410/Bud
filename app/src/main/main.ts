@@ -15,6 +15,7 @@ import '../logger';
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { openai } from '@ai-sdk/openai';
 import { streamText, tool, jsonSchema, stepCountIs } from 'ai';
 import { bus } from './bus';
@@ -70,8 +71,10 @@ import {
   windowsTool,
   appsTool,
   createMemoryTool,
+  createFileReaderTool,
 } from './tools';
 import { RealtimeVoiceManager } from './realtime/RealtimeVoiceManager';
+import { CartesiaRealtimeVoiceManager } from './realtime/CartesiaRealtimeVoiceManager';
 import { ToolExecutor } from './realtime/RealtimeToolBridge';
 import { RealtimeSDPServer } from './realtime/RealtimeSDPServer';
 import { AnnotationController } from './annotations/AnnotationController';
@@ -93,7 +96,7 @@ let globalHotkey: GlobalHotkey;
 let audioPlayback: AudioPlaybackManager;
 let settingsManager: SettingsManager;
 let agentManager: AgentManager;
-let realtimeVoiceManager: RealtimeVoiceManager;
+let realtimeVoiceManager: RealtimeVoiceManager | CartesiaRealtimeVoiceManager;
 let sdpServer: RealtimeSDPServer;
 let annotationController: AnnotationController;
 let providers: any;
@@ -197,9 +200,41 @@ app.whenReady().then(async () => {
     }
   });
 
-  // 6.5 Create RealtimeVoiceManager — primary voice pipeline (WebRTC)
+  // 6.5 Create RealtimeVoiceManager — primary voice pipeline (WebRTC or Cartesia)
+  const realtimeProvider = process.env.REALTIME_PROVIDER || 'openai';
   const realtimeApiKey = process.env.OPENAI_API_KEY || '';
-  if (realtimeApiKey) {
+  const cartesiaApiKey = process.env.CARTESIA_API_KEY || '';
+
+  if (realtimeProvider === 'cartesia' && cartesiaApiKey) {
+    realtimeVoiceManager = new CartesiaRealtimeVoiceManager({
+      config: {
+        apiKey: cartesiaApiKey,
+        ttsModel: process.env.CARTESIA_TTS_MODEL || 'sonic-3.5',
+        ttsVoiceId: process.env.CARTESIA_TTS_VOICE_ID || '',
+        sttModel: process.env.CARTESIA_STT_MODEL || 'ink-2',
+        sttSampleRate: parseInt(process.env.CARTESIA_STT_SAMPLE_RATE || '24000', 10),
+      },
+      overlayManager: {
+        sendToOverlay: (channel: string, data: any) => overlayManager.sendToOverlay(channel, data),
+        getWindow: () => overlayManager.getWindow(),
+      },
+      panelWindow: () => panelWindow,
+      onFallbackTriggered: (reason: string) => {
+        console.log(`⚠️ Cartesia realtime fallback triggered: ${reason}`);
+      },
+      systemPrompt: BUD_SYSTEM_PROMPT,
+    });
+
+    realtimeVoiceManager.on('speech.started', () => {
+      annotationController.clearAnnotations();
+    });
+
+    realtimeVoiceManager.on('interruption', () => {
+      annotationController.clearAnnotations();
+    });
+
+    console.log('🎙️ CartesiaRealtimeVoiceManager created — will register tools after panel init');
+  } else if (realtimeApiKey) {
     sdpServer = new RealtimeSDPServer({
       model: process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2',
       apiKey: realtimeApiKey,
@@ -238,7 +273,7 @@ app.whenReady().then(async () => {
 
     console.log('🔌 RealtimeVoiceManager created (WebRTC) — will register tools after panel init');
   } else {
-    console.warn('⚠️ OPENAI_API_KEY not set — Realtime voice disabled');
+    console.warn('⚠️ No realtime API key configured — Realtime voice disabled');
   }
 
   // 7. Register global hotkey → Agent kill switch + Mute toggle
@@ -314,6 +349,7 @@ app.whenReady().then(async () => {
       toToolExecutor('memory', createMemoryTool(memoryDir)),
       toToolExecutor('computerUse', createComputerUseTool(agentManager)),
       toToolExecutor('spawnWorker', createSpawnWorkerTool(() => panelWindow)),
+      toToolExecutor('readFile', createFileReaderTool()),
       captureScreenExecutor,
       waitForUserExecutor,
       drawAnnotationTools.realtimeExecutor,
@@ -420,6 +456,12 @@ ipcMain.on('send-realtime-context', (_event, data: { text?: string; images?: Arr
   realtimeVoiceManager.injectContext(text, images.length ? images : undefined);
 });
 
+ipcMain.on('realtime-pcm-chunk', (_event, base64PCM: string) => {
+  if (realtimeVoiceManager instanceof CartesiaRealtimeVoiceManager) {
+    realtimeVoiceManager.handleAudioChunk(base64PCM);
+  }
+});
+
 function convertCustomHistoryToCoreMessages(history: any[]): any[] {
   return history.map(msg => {
     if (msg.role === 'system') {
@@ -491,18 +533,29 @@ function convertCustomHistoryToCoreMessages(history: any[]): any[] {
                 mediaType: mediaType
               };
             } else {
-              let fileData = part.url || part.data || part.content;
-              if (!fileData) return null;
-              return {
-                type: 'file',
-                data: fileData,
-                mediaType: part.mediaType || part.mimeType || 'text/plain'
-              };
+              const mediaType = part.mediaType || part.mimeType || 'text/plain';
+
+              // For non-image file attachments, inline a text description with the
+              // path so the model can call readFile. Passing raw binary data as a
+              // Vercel 'file' part is not reliably consumed by OpenAI chat completions.
+              const fileName = part.name || part.filename || 'attached file';
+              const filePath = part.path || '';
+              const note = filePath
+                ? `[Attached file: ${fileName} (${mediaType}) at path: ${filePath} — use the readFile tool to read this file]`
+                : `[Attached file: ${fileName} (${mediaType}) — no path available; ask the user for the file path]`;
+
+              // If plain text content was already inlined, don't duplicate it.
+              const fileData = part.data || part.content;
+              if (fileData && typeof fileData === 'string' && mediaType.startsWith('text/')) {
+                return { type: 'text', text: `[Attached file: ${fileName}]\n${fileData}` };
+              }
+
+              return { type: 'text', text: note };
             }
           }
           return null;
         }).filter(Boolean);
-        
+
         return {
           role: 'user',
           content
@@ -543,6 +596,7 @@ export async function executeChatCompletion(
       windows: windowsTool,
       apps: appsTool,
       memory: createMemoryTool(memoryDir),
+      readFile: createFileReaderTool(),
       drawAnnotation: drawAnnotationTools.vercelTool,
       captureScreen: tool({
         description: 'Capture screenshots of all displays for visual context. Use when you need to see the screen to answer questions or decide on actions.',
@@ -629,6 +683,20 @@ ipcMain.on('send-chat-message', async (event, userMessage) => {
 
 ipcMain.handle('get-chat-history', () => {
   return chatHistory;
+});
+
+ipcMain.handle('save-staged-file', (_event, file: { name: string; mediaType: string; base64: string }) => {
+  try {
+    const safeName = file.name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+    const tmpDir = path.join(os.tmpdir(), 'bud-staged');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const tmpPath = path.join(tmpDir, `bud-staged-${Date.now()}-${safeName}`);
+    fs.writeFileSync(tmpPath, Buffer.from(file.base64, 'base64'));
+    return { success: true, path: tmpPath };
+  } catch (err: any) {
+    console.error('[save-staged-file] Failed:', err);
+    return { success: false, error: err.message || 'Failed to save staged file' };
+  }
 });
 
 ipcMain.handle('get-status', () => {
