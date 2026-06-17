@@ -152,7 +152,7 @@ export interface CartesiaGenerationRequest {
   output_format: {
     container: 'raw';
     encoding: 'pcm_f32le' | 'pcm_s16le' | 'pcm_mulaw' | 'pcm_alaw';
-    sampleRate: 8000 | 16000 | 22050 | 24000 | 44100 | 48000;
+    sample_rate: 8000 | 16000 | 22050 | 24000 | 44100 | 48000;
   };
   context_id: string;
   language?: string;

@@ -101,6 +101,14 @@ export class CartesiaTTSSession extends EventEmitter {
     return this.currentContextId;
   }
 
+  private buildOutputFormat() {
+    return {
+      container: this.config.ttsOutputFormat.container,
+      encoding: this.config.ttsOutputFormat.encoding,
+      sample_rate: this.config.ttsOutputFormat.sampleRate,
+    };
+  }
+
   sendText(text: string, contextId: string, isContinuation: boolean = false) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn('⚠️ Cannot send TTS text — WebSocket not open');
@@ -111,7 +119,7 @@ export class CartesiaTTSSession extends EventEmitter {
       model_id: this.config.ttsModel,
       transcript: text,
       voice: { mode: 'id', id: this.config.ttsVoiceId },
-      output_format: this.config.ttsOutputFormat,
+      output_format: this.buildOutputFormat(),
       context_id: contextId,
       continue: isContinuation,
       max_buffer_delay_ms: isContinuation ? 3000 : 0,
@@ -135,7 +143,7 @@ export class CartesiaTTSSession extends EventEmitter {
         model_id: this.config.ttsModel,
         transcript: '',
         voice: { mode: 'id', id: this.config.ttsVoiceId },
-        output_format: this.config.ttsOutputFormat,
+        output_format: this.buildOutputFormat(),
         context_id: contextId,
         continue: false,
         flush: true,

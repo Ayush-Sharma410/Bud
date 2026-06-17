@@ -12,8 +12,20 @@ export interface RealtimeCompletionOptions {
   onStepFinish?: (step: { toolCalls: Array<{ toolName: string; input: any }> }) => void;
 }
 
+function looksLikeGroqModel(modelName: string): boolean {
+  return modelName.includes('/');
+}
+
+function resolveProvider(modelName: string): 'groq' | 'openai' {
+  const explicitProvider = process.env.LLM_PROVIDER;
+  if (explicitProvider === 'groq' || explicitProvider === 'openai') {
+    return explicitProvider;
+  }
+  return looksLikeGroqModel(modelName) ? 'groq' : 'openai';
+}
+
 function createModel(modelName: string) {
-  const provider = process.env.LLM_PROVIDER || 'openai';
+  const provider = resolveProvider(modelName);
 
   if (provider === 'groq') {
     console.log(`🤖 Using Groq provider with model: ${modelName}`);
@@ -25,11 +37,12 @@ function createModel(modelName: string) {
 }
 
 export async function executeRealtimeCompletion(options: RealtimeCompletionOptions): Promise<string> {
-  const provider = process.env.LLM_PROVIDER || 'openai';
-  const defaultModel = provider === 'groq' ? 'qwen/qwen3-32b' : 'gpt-5.1';
+  const explicitProvider = process.env.LLM_PROVIDER;
+  const defaultModel = resolveProvider('') === 'groq' ? 'qwen/qwen3-32b' : 'gpt-5.1';
   const modelName = options.model || process.env.OPENAI_MODEL || process.env.GROQ_MODEL || defaultModel;
+  const provider = resolveProvider(modelName);
 
-  console.log(`🤖 Realtime completion starting with ${provider}/${modelName}, messages: ${options.messages.length}`);
+  console.log(`🤖 Realtime completion starting with ${explicitProvider || provider}/${modelName}, messages: ${options.messages.length}`);
 
   const result = streamText({
     model: createModel(modelName),
