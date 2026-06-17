@@ -1,0 +1,50 @@
+{
+  "name": "bud",
+  "version": "0.1.0",
+  "description": "Bud — Windows desktop voice companion",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && electron .",
+    "dev": "tsc && electron .",
+    "package": "npm run build && electron-builder"
+  },
+  "author": "Ayush",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@ai-sdk/groq": "^3.0.42",
+    "@ai-sdk/openai": "^3.0.69",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@nut-tree-fork/nut-js": "^4.2.6",
+    "@types/ws": "^8.18.1",
+    "ai": "^6.0.199",
+    "assemblyai": "^4.34.4",
+    "better-sqlite3": "^12.10.0",
+    "mammoth": "^1.12.0",
+    "openai": "^6.42.0",
+    "pdf-parse": "^2.4.5",
+    "screenshot-desktop": "^1.15.0",
+    "uiohook-napi": "^1.5.4",
+    "ws": "^8.21.0",
+    "zod": "^4.4.3"
+  },
+  "build": {
+    "appId": "com.bud.desktop",
+    "productName": "Bud",
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "directories": {
+      "output": "release"
+    }
+  }
+}

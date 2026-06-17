@@ -1,4 +1,5 @@
 import { openai } from '@ai-sdk/openai';
+import { groq } from '@ai-sdk/groq';
 import { streamText, stepCountIs } from 'ai';
 
 export interface RealtimeCompletionOptions {
@@ -11,13 +12,27 @@ export interface RealtimeCompletionOptions {
   onStepFinish?: (step: { toolCalls: Array<{ toolName: string; input: any }> }) => void;
 }
 
-export async function executeRealtimeCompletion(options: RealtimeCompletionOptions): Promise<string> {
-  const modelName = options.model || process.env.OPENAI_MODEL || 'gpt-5.1';
+function createModel(modelName: string) {
+  const provider = process.env.LLM_PROVIDER || 'openai';
 
-  console.log(`🤖 Realtime completion starting with model: ${modelName}, messages: ${options.messages.length}`);
+  if (provider === 'groq') {
+    console.log(`🤖 Using Groq provider with model: ${modelName}`);
+    return groq(modelName);
+  }
+
+  console.log(`🤖 Using OpenAI provider with model: ${modelName}`);
+  return openai(modelName);
+}
+
+export async function executeRealtimeCompletion(options: RealtimeCompletionOptions): Promise<string> {
+  const provider = process.env.LLM_PROVIDER || 'openai';
+  const defaultModel = provider === 'groq' ? 'qwen/qwen3-32b' : 'gpt-5.1';
+  const modelName = options.model || process.env.OPENAI_MODEL || process.env.GROQ_MODEL || defaultModel;
+
+  console.log(`🤖 Realtime completion starting with ${provider}/${modelName}, messages: ${options.messages.length}`);
 
   const result = streamText({
-    model: openai(modelName),
+    model: createModel(modelName),
     messages: options.messages,
     system: options.system,
     tools: options.tools,
