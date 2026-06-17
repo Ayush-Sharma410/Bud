@@ -17,6 +17,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { openai } from '@ai-sdk/openai';
+import { groq } from '@ai-sdk/groq';
 import { streamText, tool, jsonSchema, stepCountIs } from 'ai';
 import { bus } from './bus';
 import { fork } from 'child_process';
@@ -581,8 +582,10 @@ export async function executeChatCompletion(
   onError: (err: string) => void
 ) {
   try {
-    const modelName = process.env.OPENAI_MODEL || 'gpt-5.1';
-    console.log(`🤖 Chat completion starting with model: ${modelName}, history size: ${chatHistory.length}`);
+    const llmProvider = process.env.LLM_PROVIDER || 'openai';
+    const defaultModel = llmProvider === 'groq' ? 'qwen/qwen3-32b' : 'gpt-5.1';
+    const modelName = process.env.OPENAI_MODEL || process.env.GROQ_MODEL || defaultModel;
+    console.log(`🤖 Chat completion starting with ${llmProvider}/${modelName}, history size: ${chatHistory.length}`);
 
     let currentMessages = convertCustomHistoryToCoreMessages(chatHistory);
 
@@ -625,7 +628,7 @@ export async function executeChatCompletion(
 
     console.log(`🤖 Streaming response with maxSteps: 20...`);
     const result = streamText({
-      model: openai(modelName),
+      model: llmProvider === 'groq' ? groq(modelName) : openai(modelName),
       messages: currentMessages,
       system: COMPANION_PROMPT,
       tools: tools,
