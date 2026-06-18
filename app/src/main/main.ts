@@ -16,9 +16,8 @@ import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { openai } from '@ai-sdk/openai';
-import { groq } from '@ai-sdk/groq';
 import { streamText, tool, jsonSchema, stepCountIs } from 'ai';
+import { createLanguageModel, resolveLLMProvider, getDefaultModelName } from './llmProvider';
 import { bus } from './bus';
 import { fork } from 'child_process';
 import { randomUUID } from 'crypto';
@@ -585,9 +584,9 @@ export async function executeChatCompletion(
 ) {
   try {
     const explicitProvider = process.env.LLM_PROVIDER;
-    const resolvedProvider = explicitProvider || ((process.env.OPENAI_MODEL || process.env.GROQ_MODEL || '').includes('/') ? 'groq' : 'openai');
-    const defaultModel = resolvedProvider === 'groq' ? 'qwen/qwen3-32b' : 'gpt-5.1';
-    const modelName = process.env.OPENAI_MODEL || process.env.GROQ_MODEL || defaultModel;
+    const defaultModel = getDefaultModelName(resolveLLMProvider(explicitProvider || ''));
+    const modelName = process.env.MODAL_LLM_MODEL || process.env.GROQ_MODEL || process.env.OPENAI_MODEL || defaultModel;
+    const resolvedProvider = resolveLLMProvider(modelName);
     console.log(`🤖 Chat completion starting with ${explicitProvider || resolvedProvider}/${modelName}, history size: ${chatHistory.length}`);
 
     let currentMessages = convertCustomHistoryToCoreMessages(chatHistory);
@@ -631,7 +630,7 @@ export async function executeChatCompletion(
 
     console.log(`🤖 Streaming response with maxSteps: 20...`);
     const result = streamText({
-      model: resolvedProvider === 'groq' ? groq(modelName) : openai(modelName),
+      model: createLanguageModel(modelName),
       messages: currentMessages,
       system: COMPANION_PROMPT,
       tools: tools,

@@ -1,6 +1,5 @@
-import { openai } from '@ai-sdk/openai';
-import { groq } from '@ai-sdk/groq';
 import { streamText, stepCountIs } from 'ai';
+import { createLanguageModel, resolveLLMProvider, getDefaultModelName } from '../llmProvider';
 
 export interface RealtimeCompletionOptions {
   messages: any[];
@@ -12,40 +11,16 @@ export interface RealtimeCompletionOptions {
   onStepFinish?: (step: { toolCalls: Array<{ toolName: string; input: any }> }) => void;
 }
 
-function looksLikeGroqModel(modelName: string): boolean {
-  return modelName.includes('/');
-}
-
-function resolveProvider(modelName: string): 'groq' | 'openai' {
-  const explicitProvider = process.env.LLM_PROVIDER;
-  if (explicitProvider === 'groq' || explicitProvider === 'openai') {
-    return explicitProvider;
-  }
-  return looksLikeGroqModel(modelName) ? 'groq' : 'openai';
-}
-
-function createModel(modelName: string) {
-  const provider = resolveProvider(modelName);
-
-  if (provider === 'groq') {
-    console.log(`🤖 Using Groq provider with model: ${modelName}`);
-    return groq(modelName);
-  }
-
-  console.log(`🤖 Using OpenAI provider with model: ${modelName}`);
-  return openai(modelName);
-}
-
 export async function executeRealtimeCompletion(options: RealtimeCompletionOptions): Promise<string> {
   const explicitProvider = process.env.LLM_PROVIDER;
-  const defaultModel = resolveProvider('') === 'groq' ? 'qwen/qwen3-32b' : 'gpt-5.1';
-  const modelName = options.model || process.env.OPENAI_MODEL || process.env.GROQ_MODEL || defaultModel;
-  const provider = resolveProvider(modelName);
+  const defaultModel = getDefaultModelName(resolveLLMProvider(explicitProvider || ''));
+  const modelName = options.model || process.env.MODAL_LLM_MODEL || process.env.GROQ_MODEL || process.env.OPENAI_MODEL || defaultModel;
+  const provider = resolveLLMProvider(modelName);
 
   console.log(`🤖 Realtime completion starting with ${explicitProvider || provider}/${modelName}, messages: ${options.messages.length}`);
 
   const result = streamText({
-    model: createModel(modelName),
+    model: createLanguageModel(modelName),
     messages: options.messages,
     system: options.system,
     tools: options.tools,
