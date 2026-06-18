@@ -23,6 +23,8 @@ import { bus } from './bus';
 import { fork } from 'child_process';
 import { randomUUID } from 'crypto';
 
+
+  
 // Simple custom .env loader to avoid external dependencies
 function loadEnv() {
   const envPath = path.join(process.cwd(), '.env');
