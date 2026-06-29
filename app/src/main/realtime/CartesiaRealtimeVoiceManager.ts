@@ -3,13 +3,16 @@ import { EventEmitter } from 'events';
 import { tool, jsonSchema } from 'ai';
 import { CartesiaSTTSession } from './CartesiaSTTSession';
 import { CartesiaTTSSession } from './CartesiaTTSSession';
-import { executeRealtimeCompletion } from './executeRealtimeCompletion';
 import { RealtimeToolBridge, ToolExecutor } from './RealtimeToolBridge';
 import {
   CartesiaConfig,
   CartesiaVoiceState,
   CARTESIA_DEFAULTS,
 } from './cartesiaTypes';
+import {
+  OrchestratorAgent,
+  ORCHESTRATOR_SYSTEM_PROMPT,
+} from '../orchestrator';
 
 export interface CartesiaRealtimeVoiceManagerOptions {
   config: Partial<CartesiaConfig>;
@@ -35,17 +38,17 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
   private voiceState: CartesiaVoiceState = 'idle';
   private isMuted = false;
   private isResponseActive = false;
-  private isCompletionRunning = false;
   private pendingToolCalls = 0;
   private ttsContextId: string | null = null;
   private responseTextBuffer = '';
-  private messages: any[] = [];
   private reconnectFallbackTriggered = false;
+  private orchestrator: OrchestratorAgent;
+  private turnAbortController: AbortController | null = null;
 
   constructor(options: CartesiaRealtimeVoiceManagerOptions) {
     super();
     this.config = { ...CARTESIA_DEFAULTS, ...options.config };
-    this.systemPrompt = options.systemPrompt || '';
+    this.systemPrompt = options.systemPrompt || ORCHESTRATOR_SYSTEM_PROMPT;
 
     this.stt = new CartesiaSTTSession(this.config);
     this.tts = new CartesiaTTSSession(this.config);
@@ -54,8 +57,64 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     this.panelWindow = options.panelWindow;
     this.onFallbackTriggered = options.onFallbackTriggered;
 
+    this.orchestrator = new OrchestratorAgent({
+      tools: {},
+      system: this.systemPrompt,
+    });
+    this.setupOrchestratorEventHandlers();
+
     this.setupSTTHandlers();
     this.setupTTSHandlers();
+  }
+
+  private setupOrchestratorEventHandlers() {
+    const bus = this.orchestrator.events;
+
+    bus.on('text', (chunk) => {
+      this.responseTextBuffer += chunk;
+      this.emitToUI('realtime-response-chunk', chunk);
+    });
+
+    bus.on('tts', (text) => {
+      if (!this.ttsContextId) return;
+      this.setVoiceState('responding');
+      this.tts.sendText(text, this.ttsContextId, false);
+    });
+
+    bus.on('toolCall', ({ id, name, input }) => {
+      this.pendingToolCalls++;
+      console.log(`🔧 Tool call: ${name} (${id})`);
+      this.emitToUI('realtime-tool-call', { id, name, input });
+      this.emit('tool.call', { name, input });
+    });
+
+    bus.on('toolResult', ({ id, success, result }) => {
+      this.pendingToolCalls = Math.max(0, this.pendingToolCalls - 1);
+      const stripped = this.stripImageData(result);
+      this.emitToUI('realtime-tool-result', {
+        id,
+        success,
+        result: stripped,
+      });
+    });
+
+    bus.on('toolRetry', ({ id, attempt, reason }) => {
+      console.log(`🔧 Tool retry ${attempt} for ${id}: ${reason}`);
+      this.emitToUI('realtime-tool-retry', { id, attempt, reason });
+    });
+
+    bus.on('done', ({ finalText }) => {
+      this.isResponseActive = false;
+      this.tts.flushContext(this.ttsContextId!);
+      this.emitToUI('realtime-response-text', finalText);
+      this.emitToUI('realtime-response-done', {});
+    });
+
+    bus.on('error', ({ message }) => {
+      console.error('⚠️ Orchestrator error:', message);
+      this.isResponseActive = false;
+      this.speakError('Sorry, I had trouble thinking that through.');
+    });
   }
 
   private setupSTTHandlers() {
@@ -70,6 +129,7 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
       console.log('🎤 Speech detected');
       this.setVoiceState('speech-detected');
       this.emit('speech.started');
+      this.emitToUI('realtime-turn-start', {});
 
       if (this.isResponseActive || this.pendingToolCalls > 0) {
         console.log('🎤 User interrupted — stopping playback');
@@ -106,11 +166,7 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     });
 
     this.tts.on('audio.delta', (event: { contextId: string; base64Audio: string; done: boolean }) => {
-      this.emitToUI('cartesia-tts-audio', {
-        contextId: event.contextId,
-        base64Audio: event.base64Audio,
-        done: event.done,
-      });
+      // Audio playback is handled by the panel renderer; do not duplicate via emitToUI.
       this.emitToRenderer('cartesia-tts-audio', {
         contextId: event.contextId,
         base64Audio: event.base64Audio,
@@ -135,52 +191,27 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
   }
 
   private async handleUserTurn(transcript: string) {
+    if (this.isResponseActive) {
+      console.log('🗣️ Ignoring duplicate turn while response already active');
+      return;
+    }
+
     this.isResponseActive = true;
     this.responseTextBuffer = '';
     this.ttsContextId = this.tts.startContext();
-
-    this.messages.push({ role: 'user', content: transcript });
-    this.trimHistory();
+    this.turnAbortController = new AbortController();
 
     try {
-      this.isCompletionRunning = true;
-      await executeRealtimeCompletion({
-        messages: this.messages,
-        system: this.systemPrompt,
-        tools: this.buildVercelTools(),
-        model: process.env.OPENAI_MODEL,
-        onTextChunk: (chunk) => {
-          this.responseTextBuffer += chunk;
-          this.setVoiceState('responding');
-          this.emitToUI('realtime-response-chunk', chunk);
-          this.tts.sendText(chunk, this.ttsContextId!, true);
-        },
-        onToolCall: (toolCall) => {
-          this.pendingToolCalls++;
-          console.log(`🔧 Tool call: ${toolCall.name}`);
-          this.emit('tool.call', toolCall);
-        },
-        onStepFinish: ({ toolCalls }) => {
-          for (const tc of toolCalls) {
-            this.pendingToolCalls = Math.max(0, this.pendingToolCalls - 1);
-          }
-        },
-      });
-
-      this.isCompletionRunning = false;
-      this.messages.push({ role: 'assistant', content: this.responseTextBuffer });
-      this.trimHistory();
-
-      // Finalize TTS
-      this.tts.flushContext(this.ttsContextId!);
-      this.emitToUI('realtime-response-text', this.responseTextBuffer);
+      await this.orchestrator.run({ request: transcript, signal: this.turnAbortController.signal });
     } catch (err: any) {
-      console.error('⚠️ Realtime completion failed:', err.message);
-      this.isCompletionRunning = false;
+      if (err?.name === 'AbortError') {
+        console.log('🗣️ Orchestrator turn aborted by interruption');
+        return;
+      }
+      console.error('⚠️ Orchestrator turn failed:', err.message);
+      this.isResponseActive = false;
       this.speakError('Sorry, I had trouble thinking that through.');
     }
-
-    this.isResponseActive = false;
   }
 
   private buildVercelTools(): Record<string, any> {
@@ -194,25 +225,108 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
         execute: async (args: any) => {
           const result = await executor.execute(args);
 
-          const strippedResult = this.stripImageData(result);
-          const resultStr = typeof strippedResult === 'string'
-            ? strippedResult
-            : JSON.stringify(strippedResult);
+          // Normalize image payloads for Vercel AI SDK multi-modal tool results.
+          const normalized = this.normalizeToolResult(result);
 
-          this.emitToUI('realtime-tool-result', {
-            name: executor.name,
-            result: (executor.name === 'captureScreen' || executor.name === 'computerUse')
-              ? { success: true, detail: `${executor.name} executed` }
-              : result,
-          });
-
-          await this.handleToolImages(result);
-          return result;
+          // Keep the original result for the orchestrator history; images are
+          // included inside normalized content arrays.
+          return normalized;
         },
       });
     }
 
     return tools;
+  }
+
+  private normalizeToolResult(result: any): any {
+    if (!result || typeof result !== 'object') return result;
+
+    // If the tool already returned Vercel-compatible content parts, pass through.
+    if (Array.isArray(result)) {
+      return result.map((item) => this.normalizeToolResult(item));
+    }
+
+    // Handle { content: [...] } shape used by some tools.
+    if (Array.isArray(result.content)) {
+      return {
+        ...result,
+        content: result.content.map((item: any) => {
+          if (item?.type === 'image' && item.data) {
+            const resized = this.resizeBase64Image(item.data, item.mimeType || 'image/jpeg');
+            return {
+              type: 'image',
+              image: `data:${item.mimeType || 'image/jpeg'};base64,${resized}`,
+            };
+          }
+          if (item?.type === 'image' && item.image) {
+            const match = item.image.match(/^data:([^;]+);base64,(.+)$/);
+            if (match) {
+              const resized = this.resizeBase64Image(match[2], match[1]);
+              return { type: 'image', image: `data:${match[1]};base64,${resized}` };
+            }
+            return item;
+          }
+          if (item?.type === 'text' && item.text) {
+            return { type: 'text', text: item.text };
+          }
+          return item;
+        }),
+      };
+    }
+
+    // Handle captureScreen's { screens: [{ imageBase64, width, height, ... }] } shape.
+    // Preserves width/height metadata (original physical pixels) so the model can
+    // return annotation coordinates in original screenshot pixel space, while the
+    // image itself is downscaled for context-window efficiency.
+    if (Array.isArray(result.screens)) {
+      return {
+        ...result,
+        screens: result.screens.map((screen: any) => {
+          if (screen?.imageBase64) {
+            const resized = this.resizeBase64Image(screen.imageBase64, 'image/jpeg');
+            return { ...screen, imageBase64: undefined, content: [
+              { type: 'text', text: `Screen ${screen.screenIndex}: ${screen.width}x${screen.height} (coordinates in original ${screen.width}x${screen.height} pixel space)` },
+              { type: 'image', image: `data:image/jpeg;base64,${resized}` },
+            ] };
+          }
+          return screen;
+        }),
+      };
+    }
+
+    // Handle top-level image fields.
+    if (result.imageBase64 || result.image?.data) {
+      const data = result.imageBase64 || result.image?.data;
+      const mimeType = result.mimeType || result.image?.mimeType || 'image/jpeg';
+      const resized = this.resizeBase64Image(data, mimeType);
+      return {
+        ...result,
+        content: [
+          { type: 'text', text: result.detail || 'Image captured.' },
+          { type: 'image', image: `data:${mimeType};base64,${resized}` },
+        ],
+      };
+    }
+
+    return result;
+  }
+
+  private resizeBase64Image(base64Data: string, _mimeType: string, maxDim = 1280, quality = 60): string {
+    try {
+      const img = nativeImage.createFromBuffer(Buffer.from(base64Data, 'base64'));
+      if (img.isEmpty()) return base64Data;
+
+      const size = img.getSize();
+      const scale = Math.min(1, maxDim / Math.max(size.width, size.height));
+      const resized = scale < 1
+        ? img.resize({ width: Math.round(size.width * scale), height: Math.round(size.height * scale) })
+        : img;
+
+      return resized.toJPEG(quality).toString('base64');
+    } catch (err) {
+      console.error('⚠️ Failed to resize tool image:', err);
+      return base64Data;
+    }
   }
 
   private stripImageData(result: any): any {
@@ -232,57 +346,14 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     return stripped;
   }
 
-  private async handleToolImages(result: any) {
-    const images: Array<{ base64: string; mediaType: string }> = [];
-
-    if (result?.screens) {
-      for (const screen of result.screens) {
-        if (screen.imageBase64) {
-          const resized = await this.resizeImageForDataChannel(screen.imageBase64);
-          if (resized) images.push({ base64: resized, mediaType: 'image/jpeg' });
-        }
-      }
-    }
-
-    if (result?.content && Array.isArray(result.content)) {
-      for (const item of result.content) {
-        if (item.type === 'image' && item.data) {
-          const resized = await this.resizeImageForDataChannel(item.data);
-          if (resized) images.push({ base64: resized, mediaType: item.mimeType || 'image/jpeg' });
-        }
-      }
-    }
-
-    if (images.length > 0) {
-      for (const img of images) {
-        this.messages.push({
-          role: 'user',
-          content: [{ type: 'image', image: `data:${img.mediaType};base64,${img.base64}` }],
-        });
-      }
-    }
-  }
-
-  private async resizeImageForDataChannel(base64Image: string, maxDim = 1280, quality = 60): Promise<string | null> {
-    try {
-      const img = nativeImage.createFromBuffer(Buffer.from(base64Image, 'base64'));
-      if (img.isEmpty()) return null;
-
-      const size = img.getSize();
-      const scale = Math.min(1, maxDim / Math.max(size.width, size.height));
-      const resized = scale < 1 ? img.resize({ width: Math.round(size.width * scale), height: Math.round(size.height * scale) }) : img;
-
-      const jpegBuffer = resized.toJPEG(quality);
-      return jpegBuffer.toString('base64');
-    } catch (err) {
-      console.error('⚠️ Failed to resize image for data channel:', err);
-      return null;
-    }
-  }
-
   private handleInterruption() {
     this.isResponseActive = false;
     this.responseTextBuffer = '';
+
+    if (this.turnAbortController) {
+      this.turnAbortController.abort();
+      this.turnAbortController = null;
+    }
 
     if (this.ttsContextId) {
       this.tts.cancelContext(this.ttsContextId);
@@ -330,16 +401,13 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     this.onFallbackTriggered?.(reason);
   }
 
-  private trimHistory(maxMessages = 20) {
-    if (this.messages.length > maxMessages) {
-      this.messages = this.messages.slice(-maxMessages);
-    }
-  }
-
   // Public API
 
   registerTools(executors: ToolExecutor[]) {
     this.toolBridge.registerTools(executors);
+    const vercelTools = this.buildVercelTools();
+    const wrapped = OrchestratorAgent.wrapToolsWithRetry(vercelTools, this.orchestrator.events, 3);
+    this.orchestrator.setTools(wrapped);
   }
 
   start() {
@@ -395,18 +463,19 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
   }
 
   injectContext(text: string, images?: Array<{ base64: string; mediaType: string }>) {
+    const history = this.orchestrator.getHistory();
     if (text) {
-      this.messages.push({ role: 'user', content: text });
+      history.push({ role: 'user', content: text });
     }
     if (images) {
       for (const img of images) {
-        this.messages.push({
+        history.push({
           role: 'user',
           content: [{ type: 'image', image: `data:${img.mediaType};base64,${img.base64}` }],
         });
       }
     }
-    this.trimHistory();
+    this.orchestrator.setHistory(history);
   }
 
   destroy() {

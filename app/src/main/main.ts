@@ -66,6 +66,7 @@ import { SettingsManager } from './settings';
 import { VisionProvider, TTSProvider, DEFAULT_PROVIDER_CONFIG } from './providers/types';
 import { AgentManager } from './agentManager';
 import { COMPANION_PROMPT, BUD_SYSTEM_PROMPT } from './agentPrompts';
+import { OrchestratorAgent, ORCHESTRATOR_SYSTEM_PROMPT } from './orchestrator';
 import {
   createComputerUseTool,
   searchWebTool,
@@ -99,6 +100,7 @@ let audioPlayback: AudioPlaybackManager;
 let settingsManager: SettingsManager;
 let agentManager: AgentManager;
 let realtimeVoiceManager: RealtimeVoiceManager | CartesiaRealtimeVoiceManager;
+let chatOrchestrator: OrchestratorAgent;
 let sdpServer: RealtimeSDPServer;
 let annotationController: AnnotationController;
 let providers: any;
@@ -206,6 +208,12 @@ app.whenReady().then(async () => {
   const realtimeProvider = process.env.REALTIME_PROVIDER || 'openai';
   const realtimeApiKey = process.env.OPENAI_API_KEY || '';
   const cartesiaApiKey = process.env.CARTESIA_API_KEY || '';
+
+  // Shared chat orchestrator (text-based; voice uses its own instance).
+  chatOrchestrator = new OrchestratorAgent({
+    tools: {},
+    system: ORCHESTRATOR_SYSTEM_PROMPT,
+  });
 
   if (realtimeProvider === 'cartesia' && cartesiaApiKey) {
     realtimeVoiceManager = new CartesiaRealtimeVoiceManager({
@@ -583,78 +591,104 @@ export async function executeChatCompletion(
   onError: (err: string) => void
 ) {
   try {
-    const explicitProvider = process.env.LLM_PROVIDER;
-    const defaultModel = getDefaultModelName(resolveLLMProvider(explicitProvider || ''));
-    const modelName = process.env.MODAL_LLM_MODEL || process.env.GROQ_MODEL || process.env.OPENAI_MODEL || defaultModel;
-    const resolvedProvider = resolveLLMProvider(modelName);
-    console.log(`🤖 Chat completion starting with ${explicitProvider || resolvedProvider}/${modelName}, history size: ${chatHistory.length}`);
-
-    let currentMessages = convertCustomHistoryToCoreMessages(chatHistory);
-
-    // Define tools for the orchestrator
     const drawAnnotationTools = createDrawAnnotationTools(annotationController);
 
-    const tools: any = {
-      computerUse: createComputerUseTool(agentManager),
-      searchWeb: searchWebTool,
-      spawnWorker: createSpawnWorkerTool(() => panelWindow),
-      windows: windowsTool,
-      apps: appsTool,
-      memory: createMemoryTool(memoryDir),
-      readFile: createFileReaderTool(),
-      drawAnnotation: drawAnnotationTools.vercelTool,
-      captureScreen: tool({
-        description: 'Capture screenshots of all displays for visual context. Use when you need to see the screen to answer questions or decide on actions.',
-        inputSchema: jsonSchema({
-          type: 'object',
-          properties: {},
-          required: [],
+    const tools: any = OrchestratorAgent.wrapToolsWithRetry(
+      {
+        computerUse: createComputerUseTool(agentManager),
+        searchWeb: searchWebTool,
+        spawnWorker: createSpawnWorkerTool(() => panelWindow),
+        windows: windowsTool,
+        apps: appsTool,
+        memory: createMemoryTool(memoryDir),
+        readFile: createFileReaderTool(),
+        drawAnnotation: drawAnnotationTools.vercelTool,
+        captureScreen: tool({
+          description: 'Capture screenshots of all displays for visual context. Use when you need to see the screen to answer questions or decide on actions.',
+          inputSchema: jsonSchema({
+            type: 'object',
+            properties: {},
+            required: [],
+          }),
+          execute: async () => {
+            const captures = await ScreenCapture.captureAllScreens();
+            if (captures && captures.length > 0) {
+              return {
+                success: true,
+                screens: captures.map((c, i) => ({
+                  screenIndex: i,
+                  width: c.width,
+                  height: c.height,
+                  isCursorScreen: c.isCursorScreen,
+                  imageBase64: c.imageBase64,
+                })),
+              };
+            }
+            return { success: false, error: 'No screens captured' };
+          },
+          toModelOutput: ({ output }) => {
+            const result = output as any;
+            if (!result?.success || !result?.screens) {
+              return { type: 'text', value: result?.error || 'No screens captured' };
+            }
+            const value: any[] = [];
+            for (const s of result.screens) {
+              const label = s.isCursorScreen
+                ? `Screen ${s.screenIndex}: ${s.width}x${s.height} (cursor is here)`
+                : `Screen ${s.screenIndex}: ${s.width}x${s.height}`;
+              value.push({ type: 'text', text: label });
+              value.push({ type: 'image-data', data: s.imageBase64, mediaType: 'image/jpeg' });
+            }
+            return { type: 'content', value };
+          },
         }),
-        execute: async () => {
-          const captures = await ScreenCapture.captureAllScreens();
-          if (captures && captures.length > 0) {
-            return {
-              success: true,
-              screens: captures.map((c, i) => ({
-                screenIndex: i,
-                width: c.width,
-                height: c.height,
-                imageBase64: c.imageBase64,
-              })),
-            };
-          }
-          return { success: false, error: 'No screens captured' };
-        },
-      }),
-    };
+      },
+      chatOrchestrator.events,
+      3
+    );
 
-    console.log(`🤖 Streaming response with maxSteps: 20...`);
-    const result = streamText({
-      model: createLanguageModel(modelName),
-      messages: currentMessages,
-      system: COMPANION_PROMPT,
-      tools: tools,
-      stopWhen: stepCountIs(20),
-      async onStepFinish({ toolCalls }) {
-        if (toolCalls.length > 0) {
-          const names = toolCalls.map(tc => tc.toolName).join(', ');
-          console.log(`🤖 Step finished — tools used: ${names}`);
-        }
-      }
+    chatOrchestrator.setTools(tools);
+    chatOrchestrator.setHistory(convertCustomHistoryToCoreMessages(chatHistory));
+
+    const unsubscribe: (() => void)[] = [];
+    let finalText = '';
+
+    unsubscribe.push(
+      chatOrchestrator.events.on('text', (chunk) => {
+        finalText += chunk;
+        onChunk(chunk);
+      })
+    );
+
+    unsubscribe.push(
+      chatOrchestrator.events.on('tts', (text) => {
+        // Chat has no voice output by default; log TTS snippets.
+        console.log('🗣️ Chat TTS snippet:', text);
+      })
+    );
+
+    unsubscribe.push(
+      chatOrchestrator.events.on('toolCall', ({ name }) => {
+        console.log(`🔧 Chat tool call: ${name}`);
+      })
+    );
+
+    unsubscribe.push(
+      chatOrchestrator.events.on('error', ({ message }) => {
+        onError(message);
+      })
+    );
+
+    const { finalText: resultText } = await chatOrchestrator.run({
+      request: chatHistory[chatHistory.length - 1]?.text || '',
     });
 
-    let finalText = '';
-    for await (const chunk of result.textStream) {
-      finalText += chunk;
-      onChunk(chunk);
-    }
-
-    // Removed manual responseMessages persistence as Vercel AI SDK handles history natively
+    for (const fn of unsubscribe) fn();
 
     // Broadcast history update to the panel renderer
     panelWindow?.webContents.send('chat-history-updated', chatHistory);
 
-    onEnd(finalText);
+    onEnd(resultText || finalText);
 
   } catch (err: any) {
     console.error('Error in executeChatCompletion:', err);

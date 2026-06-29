@@ -25,14 +25,16 @@ MINUTES = 60
 
 # --- Caching Volumes ---
 HF_CACHE_VOL = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
-HF_CACHE_PATH = "/root/.cache/huggingface"
+HF_CACHE_PATH = "/mnt/hf-cache"
 
 # --- Container Image ---
 # Start from SGLang runtime image
 sglang_image = (
-    modal.Image.from_registry("lmsysorg/sglang:v0.5.9-cu129-amd64-runtime")
+    modal.Image.from_registry("lmsysorg/sglang:v0.5.13.post1-cu129")
     .entrypoint([])  # silence chatty logs on container start
-    .pip_install("requests")
+    .run_commands(
+        "python3 -m pip install --force-reinstall --no-cache-dir 'typing_extensions>=4.13.0' 'pydantic>=2.9.0' 'pydantic-core>=2.27.0' requests",
+    )
     .env(
         {
             "HF_HUB_CACHE": HF_CACHE_PATH,

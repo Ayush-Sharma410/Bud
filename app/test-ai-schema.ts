@@ -1,0 +1,1 @@
+import { generateText } from 'ai'; import { openai } from '@ai-sdk/openai'; async function run() { try { await generateText({ model: openai('gpt-4o-mini'), messages: [{ role: 'user', content: [{ type: 'image', image: 'some-base64', mediaType: 'image/jpeg' }] }] }); } catch (e) { console.error(e); } } run();

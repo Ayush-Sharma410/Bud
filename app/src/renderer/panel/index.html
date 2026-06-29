@@ -1128,7 +1128,7 @@
     settingsCloseBtn.addEventListener('click', () => settingsPanel.classList.remove('active'));
 
     const stateLabels = {
-      'idle': '', 'listening': 'Listening', 'speech-detected': 'Speaking',
+      'idle': '', 'listening': 'Listening', 'speech-detected': 'Listening',
       'processing': 'Thinking', 'responding': 'Speaking', 'muted': 'Muted', 'fallback': 'Fallback'
     };
 
@@ -1138,12 +1138,17 @@
       'muted': 'var(--red)', 'fallback': 'var(--yellow)'
     };
 
+    const cssStateMap = {
+      'speech-detected': 'listening'
+    };
+
     function setState(state) {
       voiceState = state;
       label.textContent = stateLabels[state] || state;
 
       mainPill.className = 'main-pill';
-      if (state !== 'idle') mainPill.classList.add('state-' + state);
+      const cssState = cssStateMap[state] || state;
+      if (cssState !== 'idle') mainPill.classList.add('state-' + cssState);
 
       const c = stateColors[state] || 'var(--green)';
       dot.style.background = c;
@@ -1457,16 +1462,27 @@
       window.budAPI.onChatError((err) => { addMsg('system', 'Error: ' + err); firstChunk = true; });
 
       let rtTranscriptBuf = '';
+      let rtTranscriptEl = null;
       let rtResponseBuf = '';
       let rtResponseEl = null;
 
+      window.budAPI.onRealtimeTurnStart(() => {
+        rtTranscriptEl = null;
+        rtTranscriptBuf = '';
+      });
+
       window.budAPI.onRealtimeTranscript((t) => {
         rtTranscriptBuf = t;
-        if (t) addMsg('user', t);
+        if (!t) return;
+        if (!rtTranscriptEl) {
+          rtTranscriptEl = addMsg('user', t);
+        } else {
+          rtTranscriptEl.textContent = t;
+        }
       });
 
       window.budAPI.onRealtimeResponseChunk((chunk) => {
-        if (!rtResponseEl) { rtResponseBuf = ''; rtResponseEl = addMsg('assistant', ''); }
+        if (!rtResponseEl) { rtResponseBuf = ''; rtResponseEl = addMsg('assistant', ''); rtTranscriptEl = null; }
         rtResponseBuf += chunk;
         rtResponseEl.textContent = rtResponseBuf;
         scrollChat();
@@ -1476,18 +1492,34 @@
         if (rtResponseEl && text) { rtResponseEl.textContent = text; scrollChat(); }
       });
 
-      window.budAPI.onRealtimeResponseDone(() => { rtResponseEl = null; rtResponseBuf = ''; });
+      window.budAPI.onRealtimeResponseDone(() => { rtResponseEl = null; rtResponseBuf = ''; rtTranscriptEl = null; });
+
+      window.budAPI.onRealtimeToolCall((data) => {
+        const name = data.name || 'tool';
+        const label = data.input?.label || data.input?.action || name;
+        addMsg('system', `▶ ${name}: ${label}`);
+      });
 
       window.budAPI.onRealtimeToolResult((data) => {
         const detail = data.result?.detail || data.result?.message || (data.name + ' executed');
-        addMsg('system', detail);
+        const status = data.success ? '✓' : '✗';
+        addMsg('system', `${status} ${data.name || 'tool'}: ${detail}`);
+      });
+
+      window.budAPI.onRealtimeToolRetry((data) => {
+        addMsg('system', `↻ retrying ${data.name || data.id} (attempt ${data.attempt})`);
       });
 
       window.budAPI.onMuteStateChange((muted) => {
         addMsg('system', muted ? 'Microphone muted' : 'Microphone unmuted');
       });
 
-      window.budAPI.onInterruption(() => { rtResponseEl = null; rtResponseBuf = ''; });
+      window.budAPI.onInterruption(() => {
+        rtResponseEl = null;
+        rtResponseBuf = '';
+        rtTranscriptEl = null;
+        if (window.realtimeWebRTC) window.realtimeWebRTC.stopPlayback();
+      });
 
       providerTog.addEventListener('click', () => {
         const next = providerTog.classList.contains('on') ? 'local' : 'modal';
@@ -1508,6 +1540,7 @@
       let knownTasks = {};
       let taskTimers = {};
       let showAllTasks = false;
+      const MAX_VISIBLE_TASKS = 4;
 
       function elapsed(epoch) {
         const s = Math.floor(Date.now() / 1000 - epoch);
@@ -1518,14 +1551,13 @@
       }
 
       async function renderTaskPills(tasks) {
-        const activeTasks = (tasks || []).filter(t => t.status === 'running' || t.status === 'pending');
-        const inactiveTasks = (tasks || []).filter(t => t.status !== 'running' && t.status !== 'pending');
-        
-        let displayTasks = showAllTasks ? (tasks || []) : activeTasks;
-        
+        const all = (tasks || []).slice().sort((a, b) => b.created_at - a.created_at);
+        const displayTasks = showAllTasks ? all : all.slice(0, MAX_VISIBLE_TASKS);
+        const hiddenCount = all.length - MAX_VISIBLE_TASKS;
+
         taskPillsEl.innerHTML = '';
 
-        if (!displayTasks.length && !inactiveTasks.length) {
+        if (!all.length) {
           taskPillsEl.classList.remove('visible');
           Object.values(taskTimers).forEach(clearInterval);
           taskTimers = {};
@@ -1552,24 +1584,24 @@
           }
         });
 
-        if (!showAllTasks && inactiveTasks.length > 0) {
+        if (hiddenCount > 0 && !showAllTasks) {
           const moreNode = document.createElement('div');
           moreNode.className = 'task-node';
-          moreNode.innerHTML = '<div class="node-dot cancelled"></div><div class="node-label">See ' + inactiveTasks.length + ' older tasks</div>';
-          moreNode.addEventListener('click', (e) => { 
-            e.stopPropagation(); 
-            showAllTasks = true; 
-            renderTaskPills(tasks); 
+          moreNode.innerHTML = '<div class="node-dot cancelled"></div><div class="node-label">+' + hiddenCount + ' more</div>';
+          moreNode.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showAllTasks = true;
+            renderTaskPills(tasks);
           });
           taskPillsEl.appendChild(moreNode);
-        } else if (showAllTasks && inactiveTasks.length > 0) {
+        } else if (showAllTasks && all.length > MAX_VISIBLE_TASKS) {
           const lessNode = document.createElement('div');
           lessNode.className = 'task-node';
-          lessNode.innerHTML = '<div class="node-dot cancelled"></div><div class="node-label">Hide older tasks</div>';
-          lessNode.addEventListener('click', (e) => { 
-            e.stopPropagation(); 
-            showAllTasks = false; 
-            renderTaskPills(tasks); 
+          lessNode.innerHTML = '<div class="node-dot cancelled"></div><div class="node-label">Show less</div>';
+          lessNode.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showAllTasks = false;
+            renderTaskPills(tasks);
           });
           taskPillsEl.appendChild(lessNode);
         }

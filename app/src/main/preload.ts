@@ -142,6 +142,9 @@ contextBridge.exposeInMainWorld('budAPI', {
   onRealtimeTranscript: (callback: (transcript: string) => void) => {
     ipcRenderer.on('realtime-transcript', (_event, transcript) => callback(transcript));
   },
+  onRealtimeTurnStart: (callback: () => void) => {
+    ipcRenderer.on('realtime-turn-start', callback);
+  },
   onRealtimeResponseChunk: (callback: (text: string) => void) => {
     ipcRenderer.on('realtime-response-chunk', (_event, text) => callback(text));
   },
@@ -151,8 +154,14 @@ contextBridge.exposeInMainWorld('budAPI', {
   onRealtimeResponseDone: (callback: () => void) => {
     ipcRenderer.on('realtime-response-done', callback);
   },
+  onRealtimeToolCall: (callback: (data: any) => void) => {
+    ipcRenderer.on('realtime-tool-call', (_event, data) => callback(data));
+  },
   onRealtimeToolResult: (callback: (data: any) => void) => {
     ipcRenderer.on('realtime-tool-result', (_event, data) => callback(data));
+  },
+  onRealtimeToolRetry: (callback: (data: any) => void) => {
+    ipcRenderer.on('realtime-tool-retry', (_event, data) => callback(data));
   },
   onMuteStateChange: (callback: (muted: boolean) => void) => {
     ipcRenderer.on('mute-state', (_event, muted) => callback(muted));

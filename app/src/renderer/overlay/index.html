@@ -108,10 +108,90 @@
     const spinner = document.getElementById('spinner');
     const responseBubble = document.getElementById('response-bubble');
 
+    let touring = false;
+    let tourCancelToken = 0;
+    let lastMouseX = window.innerWidth / 2;
+    let lastMouseY = window.innerHeight / 2;
+    let currentFlyToken = 0;
+
     document.addEventListener('mousemove', (e) => {
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+      if (touring) return;
       cursor.style.left = e.clientX + 'px';
       cursor.style.top = e.clientY + 'px';
     });
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    function flyCursorTo(endX, endY, duration) {
+      const myToken = ++currentFlyToken;
+      return new Promise((resolve) => {
+        const rect = cursor.getBoundingClientRect();
+        const startX = rect.left;
+        const startY = rect.top;
+
+        const midX = (startX + endX) / 2;
+        const midY = (startY + endY) / 2;
+        const dx = endX - startX;
+        const dy = endY - startY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        const nx = -dy / (distance || 1);
+        const ny = dx / (distance || 1);
+        const offset = distance * 0.25;
+        const ctrlX = midX + nx * offset;
+        const ctrlY = midY + ny * offset;
+
+        const startTime = performance.now();
+
+        function ease(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
+
+        function animate(now) {
+          if (myToken !== currentFlyToken) { resolve(); return; }
+          const elapsed = now - startTime;
+          const progress = Math.min(elapsed / (duration || 800), 1);
+          const t = ease(progress);
+          const u = 1 - t;
+          cursor.style.left = (u * u * startX + 2 * u * t * ctrlX + t * t * endX) + 'px';
+          cursor.style.top = (u * u * startY + 2 * t * u * ctrlY + t * t * endY) + 'px';
+          const tx = 2 * u * (ctrlX - startX) + 2 * t * (endX - ctrlX);
+          const ty = 2 * u * (ctrlY - startY) + 2 * t * (endY - ctrlY);
+          cursor.style.transform = 'rotate(' + (Math.atan2(ty, tx) * (180 / Math.PI) + 45) + 'deg)';
+          if (progress < 1) { requestAnimationFrame(animate); }
+          else { cursor.style.transform = 'none'; resolve(); }
+        }
+        requestAnimationFrame(animate);
+      });
+    }
+
+    function cancelTour() {
+      tourCancelToken++;
+      touring = false;
+    }
+
+    window.budCursorTour = async function (points) {
+      if (!points || points.length === 0) return;
+      cancelTour();
+      const myToken = tourCancelToken;
+      touring = true;
+      for (let i = 0; i < points.length; i++) {
+        if (myToken !== tourCancelToken) return;
+        await flyCursorTo(points[i].x, points[i].y, 800);
+        if (myToken !== tourCancelToken) return;
+        await sleep(i < points.length - 1 ? 1200 : 500);
+        if (myToken !== tourCancelToken) return;
+      }
+      if (myToken !== tourCancelToken) return;
+      touring = false;
+      cursor.style.opacity = '0';
+      await sleep(300);
+      if (myToken !== tourCancelToken) return;
+      cursor.style.left = lastMouseX + 'px';
+      cursor.style.top = lastMouseY + 'px';
+      cursor.style.opacity = '1';
+    };
+
+    window.budCursorCancelTour = cancelTour;
 
     let currentAudio = null;
 
@@ -159,76 +239,9 @@
         }, 10000);
       });
 
-      let animationFrameId = null;
-
       window.budAPI.onPointTo((data) => {
-        // Cancel any existing animation
-        if (animationFrameId) {
-          cancelAnimationFrame(animationFrameId);
-        }
-
-        // 1. Get current position
-        const rect = cursor.getBoundingClientRect();
-        const startX = rect.left;
-        const startY = rect.top;
-
-        const endX = data.x;
-        const endY = data.y;
-
-        // 2. Calculate control point for quadratic Bezier (curve upward/leftward)
-        const midX = (startX + endX) / 2;
-        const midY = (startY + endY) / 2;
-
-        const dx = endX - startX;
-        const dy = endY - startY;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-
-        // Perpendicular normal vector (pointing upward/leftward)
-        const nx = -dy / (distance || 1);
-        const ny = dx / (distance || 1);
-
-        // Control point offset: 25% of the distance perpendicular
-        const offset = distance * 0.25;
-        const ctrlX = midX + nx * offset;
-        const ctrlY = midY + ny * offset;
-
-        // 3. Animation loop (800ms duration)
-        const duration = 800;
-        const startTime = performance.now();
-
-        // Easing function: easeInOutCubic
-        function ease(t) {
-          return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-        }
-
-        function animate(now) {
-          const elapsed = now - startTime;
-          const progress = Math.min(elapsed / duration, 1);
-          const t = ease(progress);
-
-          // Quadratic Bezier interpolation
-          const u = 1 - t;
-          const x = u * u * startX + 2 * u * t * ctrlX + t * t * endX;
-          const y = u * u * startY + 2 * t * u * ctrlY + t * t * endY;
-
-          cursor.style.left = x + 'px';
-          cursor.style.top = y + 'px';
-
-          // Rotate cursor to point along flight direction (offset by 45deg to match cursor SVG)
-          const tx = 2 * u * (ctrlX - startX) + 2 * t * (endX - ctrlX);
-          const ty = 2 * u * (ctrlY - startY) + 2 * t * (endY - ctrlY);
-          const angle = Math.atan2(ty, tx) * (180 / Math.PI) + 45;
-          cursor.style.transform = `rotate(${angle}deg)`;
-
-          if (progress < 1) {
-            animationFrameId = requestAnimationFrame(animate);
-          } else {
-            // Reset rotation when finished
-            cursor.style.transform = 'none';
-          }
-        }
-
-        animationFrameId = requestAnimationFrame(animate);
+        cancelTour();
+        flyCursorTo(data.x, data.y, 800);
       });
 
       window.budAPI.onToggleCursor((enabled) => {

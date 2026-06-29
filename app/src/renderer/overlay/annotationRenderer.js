@@ -24,6 +24,9 @@
   }
 
   function clearAnnotations() {
+    if (window.budCursorCancelTour) {
+      window.budCursorCancelTour();
+    }
     const container = getContainer();
     const children = Array.from(container.children);
     for (const child of children) {
@@ -41,6 +44,9 @@
     if (!data || !Array.isArray(data.annotations) || data.annotations.length === 0) {
       return;
     }
+
+    console.log('[DEBUG-ann2] renderer: window.innerWidth/Height =', window.innerWidth, window.innerHeight, 'devicePixelRatio =', window.devicePixelRatio);
+    console.log('[DEBUG-ann2] renderer: received annotations:', data.annotations);
 
     const container = getContainer();
     const newElements = [];
@@ -60,6 +66,14 @@
         element.style.transform = 'scale(1)';
       }
     });
+
+    const tourPoints = data.annotations
+      .filter(a => a.type === 'point')
+      .map(a => ({ x: a.overlayX, y: a.overlayY }));
+
+    if (tourPoints.length > 0 && window.budCursorTour) {
+      window.budCursorTour(tourPoints);
+    }
   }
 
   function renderAnnotation(annotation) {

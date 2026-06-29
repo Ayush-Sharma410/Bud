@@ -219,6 +219,13 @@ export class RealtimeVoiceManager extends EventEmitter {
       }
     }
 
+    if (result?.imageBase64) {
+      const resized = await this.resizeImageForDataChannel(result.imageBase64);
+      if (resized) {
+        this.session.sendImageMessage(resized);
+      }
+    }
+
     this.emitToUI('realtime-tool-result', {
       name: call.name,
       callId: call.callId,

@@ -34,17 +34,17 @@ The primary Realtime Voice Pipeline (`gpt-realtime-2` over WebRTC) already does 
 
 | Role        | Env var                | Default         | Provider | Purpose                                                        |
 | ----------- | ---------------------- | --------------- | -------- | ------------------------------------------------------------- |
-| Preamble    | `BUD_PREAMBLE_MODEL`   | `gpt-5.1-mini`  | `openai` | 1–3 word engagement ack, or `<NO_ACK>`. No tools. Single-shot. |
+| Preamble    | `BUD_PREAMBLE_MODEL`   | `gpt-4.1-mini`  | `openai` | 1–3 word engagement ack, or `<NO_ACK>`. No tools. Single-shot. |
 | Complex     | `BUD_ORCHESTRATOR_MODEL` | `gpt-5.1`     | `openai` | Tool calls, multi-step workflows, final spoken answer.        |
 
-Provider is forced to `openai` for both — model-name heuristics in `resolveLLMProvider()` would mis-route `gpt-5.1-mini` to Ollama (no slash, no Modal prefix), so an explicit override is required.
+Provider is forced to `openai` for both — model-name heuristics in `resolveLLMProvider()` would mis-route `gpt-4.1-mini` to Ollama (no slash, no Modal prefix), so an explicit override is required.
 
 ## `llmProvider.ts` Changes
 
 1. Add `provider?: LLMProvider` to `CreateLanguageModelOptions`.
 2. In `createLanguageModel(name, options)`: if `options.provider` is set, branch directly to that provider's case, skipping `resolveLLMProvider()`.
 3. Add `getDefaultOrchestratorModelName()` → `process.env.BUD_ORCHESTRATOR_MODEL || 'gpt-5.1'`.
-4. Add `getDefaultPreambleModelName()` → `process.env.BUD_PREAMBLE_MODEL || 'gpt-5.1-mini'`.
+4. Add `getDefaultPreambleModelName()` → `process.env.BUD_PREAMBLE_MODEL || 'gpt-4.1-mini'`.
 5. Leave `getDefaultModelName()` untouched for the paths that still use it (`executeRealtimeCompletion`, etc.).
 6. All existing Modal/Groq/Ollama branches remain unchanged.
 
@@ -61,7 +61,7 @@ Provider is forced to `openai` for both — model-name heuristics in `resolveLLM
 ### `run()` flow
 1. Set `running = true`. Append user message, trim history (as today).
 2. **Fire two `streamText` calls in parallel, sharing `options.signal`:**
-   - **Preamble call:** `gpt-5.1-mini`, `PREAMBLE_SYSTEM_PROMPT`, last 2 history messages only, `tools: {}`, no `stopWhen` loop, single-shot.
+   - **Preamble call:** `gpt-4.1-mini`, `PREAMBLE_SYSTEM_PROMPT`, last 2 history messages only, `tools: {}`, no `stopWhen` loop, single-shot.
    - **Complex call:** `gpt-5.1`, modified `ORCHESTRATOR_SYSTEM_PROMPT` (ack removed), full history, full tools, `stepCountIs(maxSteps)` — the existing loop.
 3. **Preamble stream handling:** accumulate text; on completion, trim and check:
    - Contains `<NO_ACK>` or is empty/garbage → emit nothing.
@@ -74,11 +74,11 @@ Provider is forced to `openai` for both — model-name heuristics in `resolveLLM
    - Complex failure → existing `error` event + throw.
 
 ### Why concurrent
-The ack plays at `gpt-5.1-mini` TTFT (~150–300ms) while the complex model is already working. The final-answer critical path is the complex model's time only — the preamble does not sit on it. Forbidding the complex model from acking eliminates the double-speak risk that would otherwise make concurrency unsafe.
+The ack plays at `gpt-4.1-mini` TTFT (~150–300ms) while the complex model is already working. The final-answer critical path is the complex model's time only — the preamble does not sit on it. Forbidding the complex model from acking eliminates the double-speak risk that would otherwise make concurrency unsafe.
 
 ## Prompt Changes
 
-### New `PREAMBLE_SYSTEM_PROMPT` (for `gpt-5.1-mini`)
+### New `PREAMBLE_SYSTEM_PROMPT` (for `gpt-4.1-mini`)
 - Output *only* a 1–3 word acknowledgment, or `<NO_ACK>`.
 - Skip ack (`<NO_ACK>`) when: the answer is direct and needs no tool, the user is confirming or correcting something, or the request is unclear.
 - Match the user's language.
@@ -113,14 +113,14 @@ this.orchestrator = new OrchestratorAgent({
 });
 ```
 
-Both call sites drop the `model:` field. `OrchestratorAgent` picks up `BUD_ORCHESTRATOR_MODEL` / `BUD_PREAMBLE_MODEL` from env (with the `gpt-5.1` / `gpt-5.1-mini` defaults).
+Both call sites drop the `model:` field. `OrchestratorAgent` picks up `BUD_ORCHESTRATOR_MODEL` / `BUD_PREAMBLE_MODEL` from env (with the `gpt-5.1` / `gpt-4.1-mini` defaults).
 
 ## Env Vars
 
 Add to `app/.env.example` under the OpenAI section:
 ```
 # Two-model orchestrator split (chat panel + Cartesia fallback only)
-# BUD_PREAMBLE_MODEL=gpt-5.1-mini   # fast engagement ack
+# BUD_PREAMBLE_MODEL=gpt-4.1-mini   # fast engagement ack
 # BUD_ORCHESTRATOR_MODEL=gpt-5.1    # tool calls + workflows
 ```
 

@@ -14,7 +14,7 @@ export interface RealtimeCompletionOptions {
 export async function executeRealtimeCompletion(options: RealtimeCompletionOptions): Promise<string> {
   const explicitProvider = process.env.LLM_PROVIDER;
   const defaultModel = getDefaultModelName(resolveLLMProvider(explicitProvider || ''));
-  const modelName = options.model || process.env.MODAL_LLM_MODEL || process.env.GROQ_MODEL || process.env.OPENAI_MODEL || defaultModel;
+  const modelName = options.model || process.env.OLLAMA_MODEL || process.env.MODAL_LLM_MODEL || process.env.GROQ_MODEL || process.env.OPENAI_MODEL || defaultModel;
   const provider = resolveLLMProvider(modelName);
 
   console.log(`🤖 Realtime completion starting with ${explicitProvider || provider}/${modelName}, messages: ${options.messages.length}`);
@@ -25,6 +25,9 @@ export async function executeRealtimeCompletion(options: RealtimeCompletionOptio
     system: options.system,
     tools: options.tools,
     stopWhen: stepCountIs(20),
+    providerOptions: provider === 'ollama'
+      ? { ollama: { think: process.env.OLLAMA_THINK === 'true' } }
+      : undefined,
     async onStepFinish({ toolCalls }) {
       if (toolCalls.length > 0) {
         const names = toolCalls.map(tc => tc.toolName).join(', ');
