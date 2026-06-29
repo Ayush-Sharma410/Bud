@@ -26,15 +26,15 @@ This is a product direction, not a side mode: Bud's Excalidraw surface is the pr
 | Canvas ownership | Bud-owned embedded Excalidraw | Full control of scene, lifecycle, and persistence; no dependency on excalidraw.com session state or auth |
 | Product shape | Excalidraw-first Bud, not "Bud with a side mode" | The canvas is the primary surface; voice copilot is the primary interaction |
 | Scope | General sketchnoting | Avoid premature specialization; LLM interprets intent broadly |
-| Session interaction | User-configurable hotkey toggles a continuous voice session | Press once: open/focus canvas + start copilot session. Press again: end session, leave sketch intact |
+| Session interaction | User-configurable hotkey toggles a continuous voice session | Default `CommandOrControl+Shift+Space` (Ctrl+Shift+Space on Windows/Linux, ⌘+Shift+Space on macOS), stored in settings and user-remappable. Press once: open/focus canvas + start copilot session. Press again: end session, leave sketch intact |
 | Persistence | Hybrid: autosave local sessions + optional export/save-as | Low-friction local recovery; later export to `.excalidraw`, PNG, SVG |
 | Safety | Hybrid: small safe edits apply immediately; destructive/large/ambiguous edits require spoken confirmation | Keeps conversational flow while preventing accidental data loss |
-| Review/brainstorm | Visual proposals, not immediate edits | Pending changes render as ghost elements; explanations render as canvas-local overlay annotations |
+| Review/brainstorm | Visual proposals, not immediate edits | Pending changes render as temporary Excalidraw elements marked `ghost`/`proposalId` in `customData` with translucent/dashed styling; overlay annotations point/highlight but store no proposal state |
 | UI | Minimal passive floating HUD; voice-first confirmation | No primary buttons; "apply" / "cancel" / "change it" are spoken |
 | Voice response | Bud talks back naturally | Voice-first output, not text-first |
 | V1 footprint | Single-user / local only | No collaboration complexity in V1 |
 | Architecture | Option 2: deep main-process `ExcalidrawController` with high-level command primitives | Policy lives in the main process; renderer stays thin and policy-free |
-| Undo | Native Excalidraw undo (one logical update per voice command) + controller snapshot ring fallback | Excalidraw exposes no public undo/redo API except `history.clear`; snapshot ring is the rollback safety net |
+| Undo | Native Excalidraw undo (one logical update per voice command) + controller snapshot ring fallback | Controller focuses the canvas window and sends the platform-appropriate `CommandOrControl+Z` undo and `CommandOrControl+Y` / `CommandOrControl+Shift+Z` redo accelerators, verifies a `sceneVersion`/`onChange` delta, and falls back to snapshot restore if native undo yields no change. Snapshot ring keeps the last 50 Bud-applied ops or 30 minutes, whichever comes first (V1 defaults). Excalidraw exposes no public undo/redo API except `history.clear` |
 
 ## 4. Architecture
 
@@ -114,17 +114,17 @@ The window uses a dedicated preload (`canvasPreload.ts`) with its own `contextBr
 Single source of truth for canvas policy and scene operations in the main process. Mirrors the `AnnotationController` precedent (main-process controller, IPC to a renderer, clear lifecycle methods) but is substantially deeper because it owns safety, proposals, snapshots, and persistence.
 
 **Responsibilities:**
-- `readScene(): Promise<SceneSummary>` — request the current scene from the renderer and return a compact summary (see §6.2).
-- `applyOperation(op): Promise<ApplyResult>` — run the deterministic safety gate; if the op is safe-and-small, commit it immediately via IPC and return the result.
-- `proposeOperation(op): Promise<Proposal>` — render the op as ghost elements + an explanation annotation without committing; return a proposal with an ID, diff/summary, and TTL.
-- `confirmProposal(id): Promise<ApplyResult>` — commit the pending proposal as a real scene update.
-- `cancelProposal(id): Promise<void>` — drop the pending ghost elements.
-- `undo(): Promise<UndoResult>` — trigger native Excalidraw undo for the last Bud-applied logical update; fall back to the snapshot ring if native undo is unavailable.
+- `readScene(): Promise<SceneSummary>` — request the current scene from the renderer and return a compact summary (see §6.2). Ghost-marked elements are omitted.
+- `applyOperation(op): Promise<ApplyResult>` — run the deterministic safety gate; if the op is immediate-safe-small (§7), commit it immediately via IPC and return `{ status: 'applied', ... }`. If the op is destructive/large/ambiguous, do not commit — return `{ status: 'proposeRequired' | 'ambiguous' | 'unsupported' }` so the model re-routes through `proposeOperation`.
+- `proposeOperation(proposal: ExcalidrawProposal): Promise<ExcalidrawProposal>` — validate the payload, assign a `proposalId`, run the safety gate to set `safetyLevel`, render the proposal as ghost elements (in-scene Excalidraw elements marked in `customData` with `{ proposalId, ghost: true }` and translucent/dashed styling) plus any `overlayAnnotations`, and return the proposal with `proposalId`, `diffSummary`, `safetyLevel`, and TTL populated. Does not commit. See §6.4.
+- `confirmProposal(id, optionId?): Promise<ApplyResult>` — commit a pending proposal as a real scene update. For `mode: 'diagram_patch'`, commits the proposal's `operations`. For `mode: 'review_options'`, `optionId` is required; the selected option's `operations` are converted into a `diagram_patch` and committed. Without `optionId` on a `review_options` proposal, return `{ status: 'selectOption' }`. V1 commits only `diagram_patch` payloads; `review_options` is always converted to one selected `diagram_patch` before apply.
+- `cancelProposal(id): Promise<void>` — drop the pending ghost elements and proposal state.
+- `undo(): Promise<UndoResult>` — trigger native Excalidraw undo for the last Bud-applied logical update: focus the canvas `BrowserWindow`, send the platform-appropriate `CommandOrControl+Z` undo accelerator, verify a `sceneVersion`/`onChange` delta, and fall back to restoring the most recent snapshot-ring entry if native undo yields no scene change. Redo uses `CommandOrControl+Y` or `CommandOrControl+Shift+Z`, whichever the embedded Excalidraw build supports.
 - `exportScene(opts)` / `saveSessionAs(opts)` — orchestrate export/save-as (`.excalidraw`, PNG, SVG) via the renderer.
-- Enforce the deterministic safety gate (§7) over model judgement.
-- Own proposal state: pending proposals keyed by ID, each with a diff/summary and a TTL; auto-expire stale proposals.
+- Enforce the deterministic safety gate (§7) over model judgement; the model never self-certifies an action as safe.
+- Own proposal state: pending proposals keyed by `proposalId`, each with a `diffSummary`, `safetyLevel`, and TTL; auto-expire stale proposals; only one logical proposal is active at a time (a new proposal supersedes the old one).
 - Batch a single voice command into one logical scene update so native undo aligns with voice commands.
-- Maintain the snapshot ring (rollback safety net) and drive autosave/recent sessions.
+- Maintain the snapshot ring (rollback safety net): keep the last 50 Bud-applied operations or the last 30 minutes, whichever comes first (V1 defaults, configurable later). Ghost additions are not counted as Bud-applied operations. Drive autosave/recent sessions.
 - Subscribe to renderer `onChange` scene publishes to keep its in-memory scene fresh for concurrent-user-drawing merge (§10).
 
 ### 5.3 `excalidrawTypes.ts`
@@ -154,7 +154,7 @@ A new React-based renderer that mounts `@excalidraw/excalidraw`'s `<Excalidraw>`
 - Expose request/response IPC: answer `requestScene` with a compact summary, apply `applyScene` updates via the Excalidraw API, render/clear ghost elements, render/clear canvas-local annotations, and run exports.
 - Publish `onChange` scene updates to the main process so the controller's in-memory scene stays fresh while the user draws manually.
 - Render the minimal floating HUD (passive status: listening / speaking / proposal pending / saved).
-- Render the **ghost layer**: proposed elements as translucent overlays (not committed to the Excalidraw scene) plus canvas-local annotation overlays for explanations/highlights.
+- Render **ghost elements**: proposed elements are added to the Excalidraw scene as temporary elements marked in `customData` with `{ proposalId, ghost: true }` and translucent/dashed styling (for `review_options`, each option's elements also carry their `optionId`). Omit ghost-marked elements from `requestScene` summaries until confirmed. Canvas-local **overlay annotations** (point/highlight/label) render in a separate overlay and do not store proposal state.
 - Contain **no** safety/policy logic.
 
 ### 5.8 Settings Extension
@@ -163,13 +163,17 @@ Extend `AppSettings` / `SettingsManager` (`app/src/main/settings.ts`) with an `e
 
 ```ts
 excalidraw: {
-  toggleHotkey: string;          // e.g. 'CommandOrControl+Alt+E' — user-configurable
+  toggleHotkey: string;          // default 'CommandOrControl+Shift+Space' (Ctrl+Shift+Space on Windows/Linux, ⌘+Shift+Space on macOS) — user-configurable; Bud warns at registration if the accelerator is already bound
   saveDirectory: string;         // workspace dir for autosaved sessions
   autosaveIntervalMs: number;    // default 5000
   theme: 'light' | 'dark' | 'auto';
   safetyThresholds: {
     maxElementsPerImmediateApply: number;   // above this → require confirmation
     maxElementsPerDelete: number;           // above this → require confirmation
+  };
+  snapshotRing: {
+    maxOperations: number;       // default 50 — cap on retained Bud-applied operations
+    maxAgeMs: number;            // default 1_800_000 (30 min) — cap on retained history age
   };
 }
 ```
@@ -179,7 +183,7 @@ excalidraw: {
 Follow the existing seams:
 - Construct `ExcalidrawWindowManager` and `ExcalidrawController` during `app.whenReady()` (alongside `annotationController`).
 - Construct `createExcalidrawTools(controller)` and register: (a) the `ToolExecutor[]` with `realtimeVoiceManager.registerTools(...)`, and (b) the Vercel `tool()` map inside the `tools` object in `executeChatCompletion` (and any chat/Orchestrator construction site), exactly as `drawAnnotation` is wired today.
-- Register the toggle hotkey via `GlobalHotkey` (extend its options with an `onCanvasToggle` callback, mirroring `onMuteToggle`). Default `CommandOrControl+Alt+E`; user-configurable via settings.
+- Register the toggle hotkey via `GlobalHotkey` (extend its options with an `onCanvasToggle` callback, mirroring `onMuteToggle`). Default `CommandOrControl+Shift+Space` (resolves to Ctrl+Shift+Space on Windows/Linux, ⌘+Shift+Space on macOS); user-configurable via `excalidraw.toggleHotkey`. If the accelerator is already bound by the OS or another Bud hotkey, log a warning and let the user remap it in settings.
 - Append `EXCALIDRAW_PROMPT_INSTRUCTIONS` to `BUD_SYSTEM_PROMPT` and `ORCHESTRATOR_SYSTEM_PROMPT` where assembled, mirroring how annotation instructions are added.
 - Clear pending proposals/ghosts on Realtime `speech.started` and `interruption` events, mirroring `annotationController.clearAnnotations()` today.
 
@@ -193,7 +197,7 @@ Prefer a small set of high-level tools over many low-level calls:
 |------|---------|
 | `excalidraw_readScene` | Return a compact scene summary (IDs, text, type, bounds, selection, scene version). Avoid raw full JSON by default. |
 | `excalidraw_applyOperation` | Handle small, safe, clear, reversible create/edit operations immediately. |
-| `excalidraw_proposeOperation` | Create ghost elements + an explanation annotation without committing. Used for review/brainstorming and ambiguous improvements. |
+| `excalidraw_proposeOperation` | Create ghost elements + overlay annotations without committing. Used for review/brainstorming, ambiguous improvements, presenting alternatives (`review_options`), and any destructive/large op that must not apply directly (`diagram_patch` with `safetyLevel: 'confirmRequired'`). See §6.4. |
 | `excalidraw_confirmProposal` | Commit a pending proposal by ID. |
 | `excalidraw_cancelProposal` | Drop a pending proposal by ID. |
 | `excalidraw_undo` | Voice-first "undo that". |
@@ -234,14 +238,67 @@ type ExcalidrawOperation =
   | { kind: 'update'; id: string; changes: Partial<ExcalidrawElement>; }
   | { kind: 'delete'; ids: string[]; }
   | { kind: 'align'; ids: string[]; alignment: 'left' | 'center' | 'right' | 'top' | 'middle' | 'bottom'; }
-  | { kind: 'group' | 'ungroup'; ids: string[]; };
+  | { kind: 'group' | 'ungroup'; ids: string[]; }
+  | { kind: 'clearCanvas' }
+  | { kind: 'replaceScene'; elements: ExcalidrawElement[] }
+  | { kind: 'importScene'; source: { type: 'file'; path: string } | { type: 'session'; sessionId: string } }
+  | { kind: 'reorganizeLayout'; ids: string[]; layout: 'grid' | 'tree' | 'flow' | 'auto' };
 ```
+
+The `clearCanvas`, `replaceScene`, `importScene`, and `reorganizeLayout` variants are destructive/large by definition and are always classified `confirmRequired` by the safety gate (§7); they never apply via `applyOperation` and must flow through `proposeOperation` → `confirmProposal`. `importScene` is represented in the V1 operation union and safety table for completeness, but its implementation is Phase 2: in V1 the controller returns `{ status: 'unsupported', reason: 'import is Phase 2; use export/save-as flow' }` rather than executing it.
 
 ### 6.4 `proposeOperation` + Ghost Elements
 
-`proposeOperation` accepts the same operation union (or a richer "review" payload such as a list of options). The controller assigns a proposal ID, computes a short diff/summary, and tells the renderer to render the proposed elements as **ghost elements**: translucent overlays in the canvas renderer's ghost layer that are **not** committed to the Excalidraw scene. An accompanying canvas-local annotation overlay explains the proposal ("add a box here labeled X", "this arrow could connect A→B"). On `confirmProposal`, the controller issues an `applyOperation` that commits the ghosts as real Excalidraw elements; on `cancelProposal`, the ghost layer is cleared.
+`proposeOperation` takes a typed `ExcalidrawProposal` payload and returns the same shape with controller-assigned metadata populated. V1 supports exactly two proposal modes:
 
-Ghost elements are never committed to the Excalidraw scene and never appear in `readScene` until confirmed (the separate-overlay-layer vs. in-scene-flag implementation choice is tracked in §14).
+- `mode: 'diagram_patch'` — a single set of `operations` to preview. This is the only mode `confirmProposal` can commit in V1.
+- `mode: 'review_options'` — a list of alternative `options`, each a named `diagram_patch`. The user selects one by voice (for example, "option two" or "the flow layout one"); the controller converts the selected option into a `diagram_patch` and commits it. `review_options` is never committed directly.
+
+```ts
+type ExcalidrawProposal = {
+  proposalId?: string;                        // assigned by the controller; omitted on input, present on returned proposals
+  mode: 'diagram_patch' | 'review_options';
+  summary: string;                            // short human-readable description
+  operations?: ExcalidrawOperation[];         // required when mode === 'diagram_patch'
+  options?: ProposalOption[];                 // required when mode === 'review_options'
+  overlayAnnotations?: AnnotationRequest[];   // display-only; do not store proposal state
+  safetyLevel?: 'proposal' | 'confirmRequired';
+  diffSummary?: string;                       // computed short diff; populated by the controller
+  ttlMs?: number;
+  expiresAt?: number;                         // epoch ms
+};
+
+type ProposalOption = {
+  id: string;
+  title: string;
+  rationale: string;
+  operations: ExcalidrawOperation[];
+};
+
+type AnnotationRequest = {
+  kind: 'point' | 'highlight' | 'label';
+  targetElementId?: string;                   // element to point at / highlight
+  text?: string;                              // label text
+  x?: number; y?: number;                     // canvas coords for free-form point/label
+};
+
+type ApplyResult =
+  | { status: 'applied'; sceneVersion: number; affectedIds: string[] }
+  | { status: 'proposeRequired'; reason: string }
+  | { status: 'ambiguous'; matches: string[] }
+  | { status: 'unsupported'; reason: string }
+  | { status: 'selectOption'; proposalId: string; optionIds: string[] };
+
+type UndoResult =
+  | { status: 'undone'; via: 'native' | 'snapshot'; sceneVersion: number }
+  | { status: 'nothingToUndo' };
+```
+
+**Ghost elements.** The controller assigns a `proposalId`, runs the safety gate to set `safetyLevel`, and tells the renderer to render the proposal's elements as **ghost elements**: temporary Excalidraw scene elements marked in `customData` with `{ proposalId, ghost: true }` and translucent/dashed styling. For `review_options`, each option's ghost elements also carry their `optionId` so the renderer can style and label them distinctly. `overlayAnnotations` (point/highlight/label) render in a separate canvas-local annotation overlay and **do not store proposal state** — they only point at or highlight existing or ghost elements. Ghost elements are excluded from `readScene` summaries until confirmed, so the model does not mistake them for committed elements.
+
+**Confirm/cancel.** On `confirmProposal(id, optionId?)`, the controller resolves the proposal to a single `diagram_patch`, commits that patch as a real scene update, and clears the ghosts. For `mode: 'review_options'`, `optionId` is required; without it the controller returns `{ status: 'selectOption' }` and does not mutate the scene. On `cancelProposal(id)`, the ghost elements are removed from the scene and the proposal state is dropped. A new proposal supersedes any active one.
+
+Ghost additions are not counted as Bud-applied operations for snapshot-ring or native-undo accounting; only confirmed commits are.
 
 ### 6.5 Representative Tool Schema
 
@@ -252,7 +309,7 @@ Ghost elements are never committed to the Excalidraw scene and never appear in `
     "operation": {
       "type": "object",
       "properties": {
-        "kind": { "type": "string", "enum": ["create", "update", "delete", "align", "group", "ungroup"] },
+        "kind": { "type": "string", "enum": ["create", "update", "delete", "align", "group", "ungroup", "clearCanvas", "replaceScene", "importScene", "reorganizeLayout"] },
         "elementType": { "type": "string", "enum": ["rectangle", "ellipse", "diamond", "arrow", "line", "text", "freedraw"] },
         "id": { "type": "string", "description": "Target element ID for update/delete/align/group." },
         "ids": { "type": "array", "items": { "type": "string" }, "description": "Target element IDs for delete/align/group." },
@@ -268,11 +325,13 @@ Ghost elements are never committed to the Excalidraw scene and never appear in `
 }
 ```
 
+(`excalidraw_proposeOperation` takes the `ExcalidrawProposal` shape from §6.4, not the bare operation above; `excalidraw_applyOperation` takes the `operation` object shown here.)
+
 ### 6.6 Agent Instructions (excerpt, full text in `excalidrawPrompts.ts`)
 
 - Call `excalidraw_readScene` before editing when you don't have a fresh scene; scenes go stale while the user draws.
 - Prefer `excalidraw_applyOperation` for small, clear, reversible changes.
-- Use `excalidraw_proposeOperation` for review/brainstorming ("what's missing?"), ambiguous improvements, or when multiple options exist.
+- Use `excalidraw_proposeOperation` for review/brainstorming ("what's missing?"), ambiguous improvements, when multiple options exist (use `mode: 'review_options'`), and for any destructive/large change (`clearCanvas` / `replaceScene` / `reorganizeLayout` / `importScene` / bulk delete) which must never go through `applyOperation`.
 - Resolve ambiguous element references by proposing or asking — never guess-and-apply.
 - After a proposal, wait for the user to say "apply", "cancel", or "change it" before committing.
 - "undo that" → call `excalidraw_undo`.
@@ -292,19 +351,23 @@ The controller enforces a **deterministic safety gate** over model judgement. Th
 - Ambiguous improvements where multiple outcomes are reasonable.
 - Presenting alternatives.
 
-**Require spoken confirmation:**
+**Require spoken confirmation (always route through `proposeOperation` with `safetyLevel: 'confirmRequired'`; the spoken "apply" is the confirmation):**
 - Delete many elements (above `safetyThresholds.maxElementsPerDelete`).
-- Clear the canvas.
-- Replace or reorganize a whole diagram.
-- Overwrite / import a session that replaces current content.
+- `clearCanvas` — clear the canvas.
+- `replaceScene` — replace or overwrite the whole diagram.
+- `reorganizeLayout` — reorganize a whole diagram's layout.
+- `importScene` — overwrite/import a session or file that replaces current content. The operation is represented in V1 for completeness, but its implementation is Phase 2; in V1 the controller returns `{ status: 'unsupported' }` until the import flow lands.
+
+**Mechanism.** `applyOperation` commits only immediate-safe-small ops; for any risky/large/ambiguous op it returns `{ status: 'proposeRequired' }` (or `{ status: 'ambiguous' }`) without mutating the scene, forcing the model to re-route through `proposeOperation`. Both the "Visual proposal" and "Require spoken confirmation" buckets flow through `proposeOperation` → `confirmProposal`; they differ only in `safetyLevel` (`'proposal'` vs. `'confirmRequired'`) and in how the HUD/speech presents them. `confirmRequired` proposals are spoken with their impact named explicitly (for example, "this will clear the canvas — say apply to confirm").
 
 **Ambiguous references** (e.g., "delete the box" when several boxes exist, or a natural-language reference that matches no element uniquely) must trigger a clarification question or a proposal — never a blind apply. The controller rejects ambiguous-target operations with a structured "ambiguous" result so the model can re-ask.
 
 ### Confirmation Lifecycle
 
-- A pending proposal/operation has: a unique `id`, a short diff/summary, and a TTL (auto-expire if the user moves on).
-- It can be resolved by a later voice turn: "apply" → `confirmProposal(id)`; "cancel" → `cancelProposal(id)`; "change it" / "actually, make it …" → the model revises and re-proposes (the old proposal is cancelled).
-- Only one logical proposal is active at a time; a new proposal supersedes a stale one.
+- A pending proposal has: a unique `proposalId`, a short diff/summary, a `mode`, and a TTL (auto-expire if the user moves on).
+- `diagram_patch` proposals resolve by a later voice turn: "apply" → `confirmProposal(id)`; "cancel" → `cancelProposal(id)`; "change it" / "actually, make it …" → the model revises and re-proposes (the old proposal is cancelled).
+- `review_options` proposals require option selection before commit: for example, "option two" / "the flow layout one" resolves to `confirmProposal(id, optionId)`; "cancel" still calls `cancelProposal(id)`; a revision request cancels the old proposal and creates a new one.
+- Only one logical proposal is active at a time; a new proposal supersedes the old one.
 
 ## 8. Persistence
 
@@ -341,13 +404,15 @@ The React + Excalidraw renderer is a new build surface:
 - Edit selected or referenced elements.
 - Review the canvas and show a visual proposal (ghost + annotation).
 - Apply / cancel / revise a proposal by voice.
+- Voice "undo that" via native Excalidraw undo + snapshot-ring fallback (V1 defaults: 50 ops / 30 min).
 - Basic autosave + recent-session persistence.
 
 Phase 1 deliberately includes all three slices — **create, edit, and review/propose** — because Bud's LLM layer interprets intent; splitting them would force artificial tool boundaries and a worse first experience.
 
 ### Phase 2 — Product hardening
 
-- Robust undo/snapshot fallback (snapshot ring tuned for real rollback scenarios).
+- `importScene` implementation (operation is represented in V1 but returns `{ status: 'unsupported' }` until this lands).
+- Snapshot ring tuning beyond the V1 defaults (50 ops / 30 min) for large-scene memory cost.
 - Safety thresholds / confirmation policy finalized and configurable.
 - Recent-sessions UI.
 - Export/save-as: `.excalidraw`, PNG, SVG.
@@ -369,6 +434,7 @@ Phase 1 deliberately includes all three slices — **create, edit, and review/pr
 - Voice create works for general diagrams/sketchnotes.
 - Voice edit works for the selection and for natural-language references when unambiguous.
 - Review produces a visual proposal without committing.
+- Alternatives (`review_options`) render as distinct ghost sets; the user selects one by voice and only that option commits.
 - Voice "apply" / "cancel" / "change it" controls proposals; no primary buttons are required.
 - The safety gate confirms destructive, large, or ambiguous actions before they commit.
 - "undo that" works after a Bud-applied action.
@@ -377,7 +443,7 @@ Phase 1 deliberately includes all three slices — **create, edit, and review/pr
 
 ## 13. Risks
 
-- **Excalidraw API / history limitation.** The public Excalidraw API exposes no undo/redo except `history.clear`. V1 uses the one-logical-update-per-voice-command strategy so native history entries align with voice commands, and the controller snapshot ring is the rollback fallback. If a stable public undo API appears, prefer it.
+- **Excalidraw API / history limitation.** The public Excalidraw API exposes no undo/redo except `history.clear`. V1 triggers undo by focusing the canvas window and sending the platform-appropriate `CommandOrControl+Z` accelerator, then verifying a `sceneVersion`/`onChange` delta; if native undo yields no change, the controller restores the most recent snapshot-ring entry (last 50 Bud-applied ops or 30 min, V1 defaults). The one-logical-update-per-voice-command strategy keeps native history entries aligned with voice commands. Ghost elements (in-scene, `customData.ghost=true`) may create history entries when added; the controller does not count ghost additions as Bud-applied operations and re-renders the active proposal's ghosts from in-memory proposal state if a native undo inadvertently removes them. If a stable public undo/redo API appears, prefer it.
 - **Main/renderer process boundary.** Request/response IPC over the canvas window must be reliable under focus changes, window hide/show, and rapid voice turns. Need a request/response correlation layer (ids + timeouts) and defined behavior when the window is gone.
 - **Renderer build infrastructure.** React + Excalidraw + a bundler + offline fonts is new ground for this repo (today: `tsc`-only, plain HTML/JS renderers). This is the largest non-policy risk for Phase 1/2.
 - **Concurrency with user drawing.** The user can draw manually while Bud edits. The controller must keep a fresh scene (via `onChange` publishes) and merge/refresh before each apply to avoid clobbering in-progress user strokes.
@@ -387,21 +453,29 @@ Phase 1 deliberately includes all three slices — **create, edit, and review/pr
 - **Scope separation from the existing annotation overlay.** The screen `AnnotationController`/`OverlayManager` points at the user's screen in screen coordinates. Canvas-local annotations live in the canvas renderer in canvas coordinates. These two systems must not be conflated.
 - **Always-on vs. session-toggle semantics.** The copilot hotkey toggles a canvas-scoped session, not the raw mic (see §4.3). The semantic mapping must be obvious to the user; otherwise "end session" will feel inconsistent with Bud's always-on nature.
 
-## 14. Open Questions
+## 14. Future Decisions (post-V1)
 
-- **Default hotkey.** `CommandOrControl+Alt+E` is proposed; confirm it does not collide with user habits and is reachable on the keyboards Bud targets. User-configurable either way.
-- **Ghost layer implementation.** Render ghosts as a separate React overlay layer (recommended) vs. as Excalidraw elements with a custom `isGhost` property excluded from the committed scene. Separate layer keeps the Excalidraw scene clean; decide during Phase 1 prototyping.
-- **Native undo trigger.** Whether to synthesize the Excalidraw undo keyboard shortcut in the renderer or wait for a public API call. Phase 1 will prototype the keyboard-shortcut path and keep the snapshot ring as the reliable fallback.
-- **Snapshot ring depth.** How many snapshots to keep vs. memory cost for large scenes. Tune in Phase 2.
+The V1 requirements listed below are decided (see referenced sections); only out-of-scope, post-V1 tuning remains. There are no unresolved V1 questions.
+
+- **Default hotkey — decided for V1.** Default `CommandOrControl+Shift+Space` (Ctrl+Shift+Space on Windows/Linux, ⌘+Shift+Space on macOS), stored in `excalidraw.toggleHotkey`, user-configurable, and warned on collision at registration (§5.8, §5.9). Post-V1: revisit per-platform defaults if collision reports cluster on a given OS.
+- **Ghost implementation — decided for V1.** Ghosts are temporary in-scene Excalidraw elements marked in `customData` with `{ proposalId, ghost: true }` and translucent/dashed styling; overlay annotations point/highlight but store no proposal state (§5.2, §5.7, §6.4). Post-V1: none.
+- **Native undo trigger — decided for V1.** The controller focuses the canvas `BrowserWindow`, sends the platform-appropriate `CommandOrControl+Z` undo accelerator, verifies a `sceneVersion`/`onChange` delta, and falls back to snapshot restore if native undo yields no change (§5.2, §13). Post-V1: if Excalidraw ships a stable public undo/redo API, prefer it over keyboard synthesis.
+- **Snapshot ring depth — decided for V1.** Keep the last 50 Bud-applied operations or the last 30 minutes, whichever comes first (V1 defaults, configurable later) (§5.2, §5.8). Post-V1: Phase 2 tunes depth for large-scene memory cost.
+- **`excalidraw_getElement` detail tool.** Deferred to Phase 2+ as the context-bloat escape valve (§6.1).
+- **Recent-sessions UI.** Phase 2; V1 keeps only a minimal recent index (§8).
+- **Collaboration / sharing.** Future, not V1 (§2).
 
 ## 15. Testing Plan
 
-- **Unit — safety gate:** feed create/update/delete/clear/replace ops and assert immediate-apply vs. proposal vs. confirmation-required classification against configured thresholds.
-- **Unit — proposal lifecycle:** propose → confirm commits; propose → cancel drops ghosts; propose → supersede cancels the old one; TTL expiry drops stale proposals.
+- **Unit — safety gate:** feed create/update/delete/clearCanvas/replaceScene/reorganizeLayout/importScene ops and assert: immediate-apply for small create/update; `proposeRequired` (not commit) for clearCanvas/replaceScene/reorganizeLayout and bulk delete above threshold; `unsupported` for importScene in V1; classification matches configured thresholds.
+- **Unit — proposal lifecycle (`diagram_patch`):** propose → confirm commits; propose → cancel drops ghosts; propose → supersede cancels the old one; TTL expiry drops stale proposals; `confirmRequired` proposals commit only on explicit `confirmProposal`.
+- **Unit — proposal lifecycle (`review_options`):** proposing `mode: 'review_options'` renders one ghost set per option; `confirmProposal(id)` without `optionId` returns `{ status: 'selectOption' }` and does not commit; `confirmProposal(id, optionId)` commits only the selected option's operations as a `diagram_patch`; unselected options are cleared.
+- **Unit — ghost marking:** ghost elements carry `customData.ghost=true` and `customData.proposalId`; `readScene` omits ghost-marked elements; `overlayAnnotations` do not carry proposal state.
 - **Unit — ambiguous references:** operations with non-unique targets return a structured "ambiguous" result and do not mutate the scene.
 - **Unit — readScene compactness:** assert the summary omits full per-element JSON and includes stable IDs, selection, and scene version.
 - **Integration — dual registration:** register the tools with a mock `RealtimeToolBridge` and a mock Vercel `tool()` harness; invoke each tool and confirm both paths route to the same controller method.
-- **Renderer — ghost layer:** load the canvas renderer in a test harness, drive `renderGhosts`/`clearGhosts`/`applyScene` IPC, and verify ghosts do not appear in the committed scene until confirmed.
+- **Renderer — ghosts:** load the canvas renderer in a test harness, drive propose/confirm/cancel IPC, and verify ghost elements are in-scene with `customData.ghost=true`, are omitted from `requestScene`, and are removed on cancel / converted to real elements on confirm.
+- **Unit — undo:** after a Bud-applied commit, `undo()` focuses the canvas window, sends the undo accelerator, detects a `sceneVersion` delta, and returns `{ via: 'native' }`; when native undo yields no delta, `undo()` restores the latest snapshot-ring entry and returns `{ via: 'snapshot' }`; with no Bud-applied history, it returns `{ status: 'nothingToUndo' }`.
 - **IPC — request/response reliability:** simulate window hide/show and rapid turns; assert requests time out cleanly and do not leak when the window is gone.
 - **Manual QA:**
   - Hotkey opens/focuses canvas, starts session, ends session, sketch survives.
