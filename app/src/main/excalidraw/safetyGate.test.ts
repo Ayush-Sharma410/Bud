@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS: ExcalidrawSettings = {
   toggleHotkey: 'CommandOrControl+Shift+Space',
   saveDirectory: '/tmp/bud-test/sessions',
   autosaveIntervalMs: 5000,
+  maxRecentSessions: 20,
   theme: 'auto',
   safetyThresholds: { maxElementsPerImmediateApply: 5, maxElementsPerDelete: 3 },
   snapshotRing: { maxOperations: 50, maxAgeMs: 1_800_000 },

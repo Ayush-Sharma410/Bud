@@ -1,7 +1,10 @@
 import { randomUUID } from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import { ExcalidrawWindowManager } from './ExcalidrawWindowManager';
 import { classifyOperation } from './safetyGate';
 import { SnapshotRing } from './SnapshotRing';
+import { SessionStore, type RecentSessionEntry } from './SessionStore';
 import type {
   ApplyResult,
   CanvasApplyRequest,
@@ -35,6 +38,10 @@ import type { AppSettings } from '../settings';
 
 export interface ExcalidrawControllerOptions {
   windowManager: ExcalidrawWindowManager;
+  /** Optional lightweight recent-session store. If provided, autosave is enabled. */
+  sessionStore?: SessionStore;
+  /** Autosave interval in milliseconds. Falls back to settings or 5000. */
+  autosaveIntervalMs?: number;
   /** Callback that returns whether the realtime voice pipeline is currently muted. */
   getMuted?: () => boolean;
   /** Callback that toggles realtime mute. Should return the new muted state. */
@@ -121,6 +128,15 @@ export class ExcalidrawController {
   private pendingRedo: PendingRedo | null = null;
   private pendingRestore: PendingRestore | null = null;
 
+  // S6 autosave + recent sessions
+  private sessionStore?: SessionStore;
+  private autosaveTimer: ReturnType<typeof setInterval> | null = null;
+  private autosaveIntervalMs: number;
+  private dirty = false;
+  private saving = false;
+  private hudRevertTimer: ReturnType<typeof setTimeout> | null = null;
+  private currentSessionId: string;
+
   // S2 session state
   private isSessionActive = false;
   private sessionStartedAt?: number;
@@ -134,15 +150,34 @@ export class ExcalidrawController {
 
   constructor(options: ExcalidrawControllerOptions) {
     this.windowManager = options.windowManager;
+    this.sessionStore = options.sessionStore;
     this.getMuted = options.getMuted;
     this.toggleMute = options.toggleMute;
     this.getSettings = options.getSettings;
     this.timeoutMs = options.timeoutMs ?? 5000;
+    this.autosaveIntervalMs = options.autosaveIntervalMs ?? this.getExcalidrawSettings().autosaveIntervalMs;
+    this.currentSessionId = randomUUID();
+    if (this.sessionStore) {
+      this.startAutosave();
+    }
   }
 
   /** Inject or replace the settings provider after app startup. */
   setSettingsProvider(getSettings: () => AppSettings): void {
     this.getSettings = getSettings;
+    if (this.sessionStore) {
+      const interval = this.getExcalidrawSettings().autosaveIntervalMs;
+      if (interval !== this.autosaveIntervalMs) {
+        this.autosaveIntervalMs = interval;
+        this.startAutosave();
+      }
+    }
+  }
+
+  /** Inject or replace the session store. Starts autosave if a store is provided. */
+  setSessionStore(sessionStore: SessionStore): void {
+    this.sessionStore = sessionStore;
+    this.startAutosave();
   }
 
   /** Open the canvas window, or bring it to the foreground if it already exists. */
@@ -193,6 +228,7 @@ export class ExcalidrawController {
   /** Receive periodic scene summaries published by the renderer on every change. */
   onSceneChange(scene: SceneSummary): void {
     this.latestScene = scene;
+    this.dirty = true;
 
     // S5: a pending undo/redo is considered successful when the scene version
     // changes from the baseline captured just before the command was sent.
@@ -294,11 +330,28 @@ export class ExcalidrawController {
   }
 
   /**
-   * Ask the renderer for a full internal scene snapshot (elements + appState).
+   * Ask the renderer for a private full-scene snapshot (elements + appState).
    * This snapshot is never returned to LLM/tool callers.
    */
   private async requestSnapshot(): Promise<FullSceneSnapshot> {
-    await this.windowManager.openOrFocus();
+    return this.requestSnapshotInternal(true) as Promise<FullSceneSnapshot>;
+  }
+
+  /**
+   * Internal snapshot request. When `openIfNeeded` is false, returns null
+   * without creating a new canvas window. Used by autosave so saving does not
+   * resurrect a closed canvas.
+   */
+  private async requestSnapshotInternal(openIfNeeded: boolean): Promise<FullSceneSnapshot | null> {
+    const win = this.windowManager.getWindow();
+    if (!openIfNeeded && (!win || win.isDestroyed())) {
+      return null;
+    }
+    if (openIfNeeded) {
+      await this.windowManager.openOrFocus();
+    } else if (!win || win.isDestroyed()) {
+      return null;
+    }
 
     return new Promise<FullSceneSnapshot>((resolve, reject) => {
       const requestId = randomUUID();
@@ -801,6 +854,7 @@ export class ExcalidrawController {
         toggleHotkey: 'CommandOrControl+Shift+Space',
         saveDirectory: '',
         autosaveIntervalMs: 5000,
+        maxRecentSessions: 20,
         theme: 'auto',
         safetyThresholds: { maxElementsPerImmediateApply: 5, maxElementsPerDelete: 3 },
         snapshotRing: { maxOperations: 50, maxAgeMs: 1_800_000 },
@@ -884,5 +938,133 @@ export class ExcalidrawController {
 
   private setHUDStateFromSession(): void {
     this.setHUDState(this.isSessionActive ? 'listening' : 'idle');
+  }
+
+  // --- S6: autosave + recent sessions --------------------------------------
+
+  private startAutosave(): void {
+    this.stopAutosave();
+    this.autosaveIntervalMs = this.getExcalidrawSettings().autosaveIntervalMs;
+    this.autosaveTimer = setInterval(() => this.autosaveTick(), this.autosaveIntervalMs);
+  }
+
+  private stopAutosave(): void {
+    if (this.autosaveTimer) {
+      clearInterval(this.autosaveTimer);
+      this.autosaveTimer = null;
+    }
+  }
+
+  /** Force an immediate autosave if there is a pending dirty scene. */
+  async saveNow(): Promise<void> {
+    return this.autosaveTick();
+  }
+
+  /** Return the recent-session metadata index (no full scene JSON). */
+  getRecentSessions(): RecentSessionEntry[] {
+    return this.sessionStore?.getRecentSessions() ?? [];
+  }
+
+  /** Stop autosave and clear pending HUD timers. Called during app shutdown. */
+  dispose(): void {
+    this.stopAutosave();
+    if (this.hudRevertTimer) {
+      clearTimeout(this.hudRevertTimer);
+      this.hudRevertTimer = null;
+    }
+    this.clearProposals();
+  }
+
+  private hasOpenWindow(): boolean {
+    const win = this.windowManager.getWindow();
+    return !!win && !win.isDestroyed();
+  }
+
+  private async autosaveTick(): Promise<void> {
+    if (!this.sessionStore || !this.dirty || this.saving) {
+      return;
+    }
+    if (!this.hasOpenWindow()) {
+      return;
+    }
+
+    this.saving = true;
+    try {
+      const snapshot = await this.requestSnapshotInternal(false);
+      if (!snapshot) {
+        return;
+      }
+      this.writeAutosave(snapshot);
+      this.dirty = false;
+      this.flashSavedHUD();
+    } catch (err: any) {
+      console.warn('⚠️ ExcalidrawController: autosave failed:', err?.message || err);
+    } finally {
+      this.saving = false;
+    }
+  }
+
+  private writeAutosave(snapshot: FullSceneSnapshot): void {
+    if (!this.sessionStore) {
+      return;
+    }
+
+    const saveDirectory = this.sessionStore.getSaveDirectory();
+    fs.mkdirSync(saveDirectory, { recursive: true });
+
+    const realElements = (snapshot.elements || []).filter((el) => !this.isGhostElement(el));
+    const sceneFile = {
+      type: 'excalidraw',
+      version: 2,
+      source: 'Bud',
+      elements: realElements,
+      appState: snapshot.appState ?? {},
+      files: {},
+    };
+
+    const filePath = path.join(saveDirectory, `${this.currentSessionId}.excalidraw`);
+    const tempPath = `${filePath}.tmp`;
+    fs.writeFileSync(tempPath, JSON.stringify(sceneFile, null, 2), 'utf-8');
+    fs.renameSync(tempPath, filePath);
+
+    const name = this.deriveSessionName(realElements);
+    this.sessionStore.addOrUpdateSession({
+      sessionId: this.currentSessionId,
+      name,
+      updatedAt: Date.now(),
+      filePath,
+    });
+  }
+
+  private isGhostElement(element: any): boolean {
+    if (!element || typeof element !== 'object') {
+      return false;
+    }
+    const customData = element.customData;
+    if (!customData || typeof customData !== 'object') {
+      return false;
+    }
+    return customData.ghost === true || !!customData.proposalId;
+  }
+
+  private deriveSessionName(elements: any[]): string {
+    const textEl = elements.find(
+      (el) => el?.type === 'text' && typeof el.text === 'string' && el.text.trim().length > 0,
+    );
+    if (textEl) {
+      return textEl.text.trim().slice(0, 80);
+    }
+    return `Session ${new Date().toISOString()}`;
+  }
+
+  private flashSavedHUD(): void {
+    if (this.activeProposalId) {
+      return;
+    }
+    this.setHUDState('saved');
+    if (this.hudRevertTimer) {
+      clearTimeout(this.hudRevertTimer);
+    }
+    this.hudRevertTimer = setTimeout(() => this.setHUDStateFromSession(), 1500);
   }
 }

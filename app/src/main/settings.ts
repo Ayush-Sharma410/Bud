@@ -18,6 +18,8 @@ export interface ExcalidrawSettings {
   saveDirectory: string;
   /** Autosave interval in milliseconds. */
   autosaveIntervalMs: number;
+  /** Maximum number of recent sessions to keep in the index. */
+  maxRecentSessions: number;
   /** Canvas UI theme. */
   theme: CanvasTheme;
   /** Safety-gate thresholds for immediate vs. proposed edits. */
@@ -43,6 +45,7 @@ const DEFAULT_EXCALIDRAW_SETTINGS: ExcalidrawSettings = {
   toggleHotkey: 'CommandOrControl+Shift+Space',
   saveDirectory: path.join(app.getPath('userData'), 'excalidraw-sessions'),
   autosaveIntervalMs: 5000,
+  maxRecentSessions: 20,
   theme: 'auto',
   safetyThresholds: {
     maxElementsPerImmediateApply: 5,

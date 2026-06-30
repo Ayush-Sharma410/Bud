@@ -84,6 +84,7 @@ import { AnnotationController } from './annotations/AnnotationController';
 import { createDrawAnnotationTools } from './annotations/createDrawAnnotationTool';
 import { ExcalidrawWindowManager } from './excalidraw/ExcalidrawWindowManager';
 import { ExcalidrawController } from './excalidraw/ExcalidrawController';
+import { SessionStore } from './excalidraw/SessionStore';
 import type { CanvasApplyResponse, CanvasGhostResponse, CanvasRedoNativeResponse, CanvasRestoreSnapshotResponse, CanvasSceneResponse, CanvasSnapshotResponse, CanvasUndoNativeResponse, SceneSummary } from './excalidraw/excalidrawTypes';
 
 // Prevent multiple instances
@@ -108,6 +109,7 @@ let sdpServer: RealtimeSDPServer;
 let annotationController: AnnotationController;
 let excalidrawWindowManager: ExcalidrawWindowManager;
 let excalidrawController: ExcalidrawController;
+let excalidrawSessionStore: SessionStore | undefined;
 let providers: any;
 let memoryDir: string;
 let chatHistory: any[] = [
@@ -229,6 +231,14 @@ app.whenReady().then(async () => {
   settingsManager = new SettingsManager();
   excalidrawController.setSettingsProvider(() => settingsManager.getSettings());
   const currentSettings = settingsManager.getSettings();
+
+  // S6: lightweight recent-session store + autosave backing
+  excalidrawSessionStore = new SessionStore(
+    currentSettings.excalidraw.saveDirectory,
+    currentSettings.excalidraw.maxRecentSessions,
+  );
+  excalidrawController.setSessionStore(excalidrawSessionStore);
+
   providers = createProviders(currentSettings);
 
   // 6. Create Agent Manager for Computer Use
@@ -438,6 +448,7 @@ app.on('before-quit', () => {
   if (sdpServer) {
     sdpServer.stop();
   }
+  excalidrawController?.dispose();
   excalidrawWindowManager?.destroy();
 });
 
@@ -798,6 +809,9 @@ ipcMain.handle('get-status', () => {
   return {
     state: realtimeVoiceManager?.getVoiceState() || 'idle',
     settings: settingsManager.getSettings(),
+    excalidraw: {
+      recentSessions: excalidrawSessionStore?.getRecentSessions(10) ?? [],
+    },
   };
 });
 
