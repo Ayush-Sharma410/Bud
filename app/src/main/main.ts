@@ -82,6 +82,9 @@ import { ToolExecutor } from './realtime/RealtimeToolBridge';
 import { RealtimeSDPServer } from './realtime/RealtimeSDPServer';
 import { AnnotationController } from './annotations/AnnotationController';
 import { createDrawAnnotationTools } from './annotations/createDrawAnnotationTool';
+import { ExcalidrawWindowManager } from './excalidraw/ExcalidrawWindowManager';
+import { ExcalidrawController } from './excalidraw/ExcalidrawController';
+import type { CanvasSceneResponse, SceneSummary } from './excalidraw/excalidrawTypes';
 
 // Prevent multiple instances
 const gotTheLock = app.requestSingleInstanceLock();
@@ -103,6 +106,8 @@ let realtimeVoiceManager: RealtimeVoiceManager | CartesiaRealtimeVoiceManager;
 let chatOrchestrator: OrchestratorAgent;
 let sdpServer: RealtimeSDPServer;
 let annotationController: AnnotationController;
+let excalidrawWindowManager: ExcalidrawWindowManager;
+let excalidrawController: ExcalidrawController;
 let providers: any;
 let memoryDir: string;
 let chatHistory: any[] = [
@@ -163,6 +168,22 @@ app.whenReady().then(async () => {
     sendToOverlay: (channel: string, data: any) => overlayManager.sendToOverlay(channel, data),
     getOverlayWindow: () => overlayManager.getWindow(),
   });
+
+  // 2.6 Create Excalidraw canvas controller (S1: window manager + readScene IPC only)
+  excalidrawWindowManager = new ExcalidrawWindowManager();
+  excalidrawController = new ExcalidrawController({
+    windowManager: excalidrawWindowManager,
+  });
+
+  ipcMain.on('canvas:scene-response', (_event, response: CanvasSceneResponse) => {
+    excalidrawController.handleSceneResponse(response);
+  });
+
+  ipcMain.on('canvas:scene-change', (_event, scene: SceneSummary) => {
+    excalidrawController.onSceneChange(scene);
+  });
+
+  console.log('🎨 Excalidraw canvas controller initialized (S1)');
 
   // 3. Create audio playback manager (uses overlay window for audio)
   audioPlayback = new AudioPlaybackManager();
@@ -383,6 +404,7 @@ app.on('before-quit', () => {
   if (sdpServer) {
     sdpServer.stop();
   }
+  excalidrawWindowManager?.destroy();
 });
 
 // --- Panel Window ---
