@@ -8,7 +8,10 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type {
   CanvasApplyRequest,
   CanvasApplyResponse,
+  CanvasClearGhostsRequest,
+  CanvasGhostResponse,
   CanvasHUDPayload,
+  CanvasRenderGhostsRequest,
   CanvasSceneRequest,
   CanvasSceneResponse,
   SceneSummary,
@@ -37,6 +40,25 @@ contextBridge.exposeInMainWorld('budCanvasAPI', {
     ipcRenderer.on('canvas:apply-scene', (_event, request: CanvasApplyRequest) => {
       callback(request);
     });
+  },
+
+  // Main -> renderer: render a proposal's ghost elements
+  onRenderGhosts: (callback: (request: CanvasRenderGhostsRequest) => void) => {
+    ipcRenderer.on('canvas:render-ghosts', (_event, request: CanvasRenderGhostsRequest) => {
+      callback(request);
+    });
+  },
+
+  // Main -> renderer: clear ghost elements
+  onClearGhosts: (callback: (request: CanvasClearGhostsRequest) => void) => {
+    ipcRenderer.on('canvas:clear-ghosts', (_event, request: CanvasClearGhostsRequest) => {
+      callback(request);
+    });
+  },
+
+  // Renderer -> main: acknowledge render/clear of ghosts
+  sendGhostResponse: (proposalId: string, action: CanvasGhostResponse['action'], status: CanvasGhostResponse['status'], reason?: string) => {
+    ipcRenderer.send('canvas:ghost-response', { proposalId, action, status, reason } as CanvasGhostResponse);
   },
 
   // Renderer -> main response: answer for a specific apply request

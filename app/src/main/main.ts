@@ -84,7 +84,7 @@ import { AnnotationController } from './annotations/AnnotationController';
 import { createDrawAnnotationTools } from './annotations/createDrawAnnotationTool';
 import { ExcalidrawWindowManager } from './excalidraw/ExcalidrawWindowManager';
 import { ExcalidrawController } from './excalidraw/ExcalidrawController';
-import type { CanvasApplyResponse, CanvasSceneResponse, SceneSummary } from './excalidraw/excalidrawTypes';
+import type { CanvasApplyResponse, CanvasGhostResponse, CanvasSceneResponse, SceneSummary } from './excalidraw/excalidrawTypes';
 
 // Prevent multiple instances
 const gotTheLock = app.requestSingleInstanceLock();
@@ -189,7 +189,11 @@ app.whenReady().then(async () => {
     excalidrawController.handleApplyResponse(response);
   });
 
-  console.log('🎨 Excalidraw canvas controller initialized (S1/S2/S3)');
+  ipcMain.on('canvas:ghost-response', (_event, response: CanvasGhostResponse) => {
+    excalidrawController.handleGhostResponse(response);
+  });
+
+  console.log('🎨 Excalidraw canvas controller initialized (S1/S2/S3/S4)');
 
   // 3. Create audio playback manager (uses overlay window for audio)
   audioPlayback = new AudioPlaybackManager();

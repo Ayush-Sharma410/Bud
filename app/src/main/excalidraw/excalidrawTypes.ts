@@ -180,13 +180,35 @@ export type ExcalidrawOperation =
   | ImportSceneOperation
   | ReorganizeLayoutOperation;
 
-/** S4+ proposal shape. Stub only for S1. */
-export interface ExcalidrawProposal {
-  proposalId?: string;
-  mode?: 'diagram_patch' | 'review_options';
-  summary?: string;
-  operations?: ExcalidrawOperation[];
+export type ProposalStatus = 'pending' | 'confirmed' | 'cancelled' | 'expired' | 'superseded';
+
+export interface ProposalOption {
+  optionId: string;
+  title: string;
+  rationale?: string;
+  operations: ExcalidrawOperation[];
 }
+
+/** S4 pending review proposal. Stored in-memory by the controller. */
+export interface ExcalidrawProposal {
+  proposalId: string;
+  mode: 'diagram_patch' | 'review_options';
+  operations: ExcalidrawOperation[];
+  options?: ProposalOption[];
+  summary?: string;
+  reason?: string;
+  createdAt: number;
+  expiresAt: number;
+  status: ProposalStatus;
+}
+
+export type ProposalResult =
+  | { status: 'pending'; proposalId: string; expiresAt: number; reason?: string }
+  | { status: 'requires_confirmation'; reason: string }
+  | { status: 'unsupported'; reason: string }
+  | { status: 'not_found'; ids: string[]; reason: string }
+  | { status: 'cancelled'; proposalId: string }
+  | { status: 'error'; reason: string };
 
 /** S3 deterministic safety-gate decision. */
 export type SafetyDecision =
@@ -202,6 +224,7 @@ export type ApplyResult =
   | { status: 'requires_confirmation'; reason: string }
   | { status: 'unsupported'; reason: string }
   | { status: 'not_found'; ids: string[]; reason: string }
+  | { status: 'selectOption'; proposalId: string; optionIds: string[] }
   | { status: 'error'; reason: string };
 
 /** S5+ undo result shape. Stub only for S1. */
@@ -232,6 +255,62 @@ export interface CanvasApplyRequest {
 export interface CanvasApplyResponse {
   requestId: string;
   result: ApplyResult;
+}
+
+/** S4 main -> renderer: render a proposal as translucent/dashed ghost elements. */
+export interface GhostElementPayload {
+  id: string;
+  type: ExcalidrawElementType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  text?: string;
+  strokeColor?: string;
+  backgroundColor?: string;
+  strokeWidth?: number;
+  roughness?: number;
+  opacity?: number;
+  angle?: number;
+  fillStyle?: 'hachure' | 'cross-hatch' | 'solid' | 'zigzag';
+  strokeStyle?: 'solid' | 'dashed' | 'dotted';
+  customData: { proposalId: string; ghost: true; originalId?: string };
+}
+
+export interface GhostOptionPayload {
+  optionId: string;
+  title: string;
+  rationale?: string;
+  ghostIds: string[];
+}
+
+export interface GhostPayload {
+  proposalId: string;
+  mode: 'diagram_patch' | 'review_options';
+  ghosts: GhostElementPayload[];
+  options?: GhostOptionPayload[];
+  reason?: string;
+  expiresAt: number;
+}
+
+export interface CanvasRenderGhostsRequest {
+  proposalId: string;
+  mode: 'diagram_patch' | 'review_options';
+  operations: ExcalidrawOperation[];
+  options?: ProposalOption[];
+  reason?: string;
+  expiresAt: number;
+}
+
+export interface CanvasClearGhostsRequest {
+  proposalId?: string;
+}
+
+export interface CanvasGhostResponse {
+  proposalId: string;
+  action: 'rendered' | 'cleared';
+  status: 'ok' | 'error';
+  reason?: string;
 }
 
 /** S2+ canvas voice-session state exposed by the controller. */

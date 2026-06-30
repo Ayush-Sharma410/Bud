@@ -16,10 +16,14 @@ import type {
 } from '@excalidraw/excalidraw/element/types';
 import type {
   CanvasApplyRequest,
+  CanvasClearGhostsRequest,
+  CanvasGhostResponse,
+  CanvasRenderGhostsRequest,
   CanvasSceneRequest,
   CreateElementOperation,
   ElementChanges,
   ExcalidrawElementType as SummaryElementType,
+  ExcalidrawOperation,
   SceneSummary,
 } from '../../main/excalidraw/excalidrawTypes';
 
@@ -77,6 +81,39 @@ export function initCanvasIPC(): void {
       });
     }
   });
+
+  window.budCanvasAPI.onRenderGhosts((request: CanvasRenderGhostsRequest) => {
+    if (!apiRef) {
+      window.budCanvasAPI.sendGhostResponse(request.proposalId, 'rendered', 'error', 'Excalidraw API not mounted yet.');
+      return;
+    }
+
+    try {
+      const ghosts = buildGhostElements(apiRef, request.operations, request.proposalId);
+      const current = apiRef.getSceneElementsIncludingDeleted();
+      const cleaned = removeGhosts(current, request.proposalId);
+      apiRef.updateScene({ elements: [...cleaned, ...ghosts], captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+      window.budCanvasAPI.sendGhostResponse(request.proposalId, 'rendered', 'ok');
+    } catch (err: any) {
+      window.budCanvasAPI.sendGhostResponse(request.proposalId, 'rendered', 'error', err?.message ?? String(err));
+    }
+  });
+
+  window.budCanvasAPI.onClearGhosts((request: CanvasClearGhostsRequest) => {
+    if (!apiRef) {
+      window.budCanvasAPI.sendGhostResponse(request.proposalId ?? '', 'cleared', 'error', 'Excalidraw API not mounted yet.');
+      return;
+    }
+
+    try {
+      const current = apiRef.getSceneElementsIncludingDeleted();
+      const cleaned = removeGhosts(current, request.proposalId);
+      apiRef.updateScene({ elements: cleaned, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+      window.budCanvasAPI.sendGhostResponse(request.proposalId ?? '', 'cleared', 'ok');
+    } catch (err: any) {
+      window.budCanvasAPI.sendGhostResponse(request.proposalId ?? '', 'cleared', 'error', err?.message ?? String(err));
+    }
+  });
 }
 
 function emptySceneSummary(): SceneSummary {
@@ -91,9 +128,11 @@ function emptySceneSummary(): SceneSummary {
 }
 
 function buildSceneSummary(elements: readonly ExcalidrawElement[], appState: AppState): SceneSummary {
-  const nonDeleted = getNonDeletedElements(elements);
+  const ghostIds = new Set(elements.filter(isGhostElement).map((el) => el.id));
+  const realElements = elements.filter((el) => !isGhostElement(el));
+  const nonDeleted = getNonDeletedElements(realElements);
   const selectedIds = Object.keys(appState.selectedElementIds ?? {}).filter(
-    (id) => appState.selectedElementIds![id] === true,
+    (id) => appState.selectedElementIds![id] === true && !ghostIds.has(id),
   );
 
   const summarized = nonDeleted
@@ -120,14 +159,14 @@ function buildSceneSummary(elements: readonly ExcalidrawElement[], appState: App
     });
 
   return {
-    sceneVersion: getSceneVersion(elements),
-    elementCount: elements.length,
+    sceneVersion: getSceneVersion(realElements),
+    elementCount: realElements.length,
     canvasSize: {
       width: appState.width ?? 0,
       height: appState.height ?? 0,
     },
     selection: selectedIds,
-    deletedCount: elements.length - nonDeleted.length,
+    deletedCount: realElements.length - nonDeleted.length,
     elements: summarized,
   };
 }
@@ -161,15 +200,34 @@ function applyOperationsToScene(
         }
         break;
       }
-      case 'delete':
-      case 'clearCanvas':
+      case 'delete': {
+        const ids = op.ids ?? [];
+        for (const id of ids) {
+          const existing = elementsById.get(id);
+          if (!existing) {
+            return { status: 'not_found', ids: [id], reason: `Element ${id} not found in scene.` };
+          }
+          if (isGhostElement(existing)) continue;
+          elementsById.set(id, markDeleted(existing));
+          affectedIds.push(id);
+        }
+        break;
+      }
+      case 'clearCanvas': {
+        for (const [id, el] of elementsById) {
+          if (isGhostElement(el) || el.isDeleted) continue;
+          elementsById.set(id, markDeleted(el));
+          affectedIds.push(id);
+        }
+        break;
+      }
       case 'replaceScene':
       case 'reorganizeLayout':
       case 'importScene': {
-        // These should never reach the renderer in S3 because the safety gate blocks them.
+        // These should never reach the renderer in S3/S4 because the safety gate blocks them.
         return {
           status: 'unsupported',
-          reason: `Operation ${op.kind} is not applied directly by the renderer in S3.`,
+          reason: `Operation ${op.kind} is not applied directly by the renderer in S3/S4.`,
         };
       }
       case 'align':
@@ -331,4 +389,100 @@ function applyElementChanges(element: ExcalidrawElement, changes: ElementChanges
 
 function generateId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 11)}`;
+}
+
+function isGhostElement(element: ExcalidrawElement): boolean {
+  return (element as any).customData?.ghost === true;
+}
+
+function isMatchingGhost(element: ExcalidrawElement, proposalId?: string): boolean {
+  if (!isGhostElement(element)) return false;
+  if (!proposalId) return true;
+  return (element as any).customData?.proposalId === proposalId;
+}
+
+function removeGhosts(elements: readonly ExcalidrawElement[], proposalId?: string): ExcalidrawElement[] {
+  return elements.filter((el) => !isMatchingGhost(el, proposalId));
+}
+
+function markDeleted(element: ExcalidrawElement): ExcalidrawElement {
+  const mutable = { ...element } as Record<string, any>;
+  mutable.isDeleted = true;
+  mutable.version = (element.version ?? 0) + 1;
+  mutable.versionNonce = Math.floor(Math.random() * 2_000_000_000);
+  mutable.updated = Date.now();
+  return mutable as ExcalidrawElement;
+}
+
+function toGhostElement<T extends ExcalidrawElement>(
+  element: T,
+  proposalId: string,
+  originalId?: string,
+): T {
+  const ghostId = `ghost-${proposalId.slice(0, 8)}-${element.id}`;
+  const mutable = { ...element } as Record<string, any>;
+  mutable.id = ghostId;
+  mutable.customData = { proposalId, ghost: true, originalId };
+  mutable.strokeStyle = 'dashed';
+  mutable.opacity = 40;
+  mutable.groupIds = [];
+  mutable.frameId = null;
+  mutable.boundElements = null;
+  mutable.version = 1;
+  mutable.versionNonce = Math.floor(Math.random() * 2_000_000_000);
+  mutable.updated = Date.now();
+  return mutable as T;
+}
+
+function buildGhostElements(
+  api: ExcalidrawImperativeAPI,
+  operations: readonly ExcalidrawOperation[],
+  proposalId: string,
+): ExcalidrawElement[] {
+  const sceneElements = api.getSceneElementsIncludingDeleted();
+  const byId = new Map<string, ExcalidrawElement>(sceneElements.map((el) => [el.id, el]));
+  const ghosts: ExcalidrawElement[] = [];
+
+  for (const op of operations) {
+    switch (op.kind) {
+      case 'create': {
+        const created = createElementFromOperation(op as CreateElementOperation);
+        ghosts.push(toGhostElement(created, proposalId));
+        break;
+      }
+      case 'update': {
+        const ids = op.ids ?? [];
+        for (const id of ids) {
+          const existing = byId.get(id);
+          if (!existing || isGhostElement(existing)) continue;
+          const changed = applyElementChanges(existing, op.changes);
+          ghosts.push(toGhostElement(changed, proposalId, id));
+        }
+        break;
+      }
+      case 'delete': {
+        const ids = op.ids ?? [];
+        for (const id of ids) {
+          const existing = byId.get(id);
+          if (!existing || isGhostElement(existing)) continue;
+          const ghost = toGhostElement(existing, proposalId, id) as Record<string, any>;
+          ghost.strokeColor = '#e03131';
+          ghost.opacity = 55;
+          ghosts.push(ghost as ExcalidrawElement);
+        }
+        break;
+      }
+      case 'clearCanvas': {
+        // No per-element ghost for a full clear; the proposal reason explains the change.
+        break;
+      }
+      default: {
+        // Ghost rendering for align/distribute/group/ungroup/reorganizeLayout is not
+        // implemented in S4; the proposal still commits via the confirmed apply path.
+        break;
+      }
+    }
+  }
+
+  return ghosts;
 }

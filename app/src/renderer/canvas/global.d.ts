@@ -1,7 +1,10 @@
 import type {
   ApplyResult,
   CanvasApplyRequest,
+  CanvasClearGhostsRequest,
+  CanvasGhostResponse,
   CanvasHUDPayload,
+  CanvasRenderGhostsRequest,
   CanvasSceneRequest,
   SceneSummary,
 } from '../../main/excalidraw/excalidrawTypes';
@@ -17,6 +20,12 @@ export interface BudCanvasAPI {
   onApplyScene: (callback: (request: CanvasApplyRequest) => void) => void;
   /** Send the result of an apply operation back to the main process. */
   sendApplyResponse: (requestId: string, result: ApplyResult) => void;
+  /** Main process pushed a proposal's ghost elements to render. */
+  onRenderGhosts: (callback: (request: CanvasRenderGhostsRequest) => void) => void;
+  /** Main process asked the renderer to clear ghost elements. */
+  onClearGhosts: (callback: (request: CanvasClearGhostsRequest) => void) => void;
+  /** Send a ghost render/clear acknowledgement back to the main process. */
+  sendGhostResponse: (proposalId: string, action: CanvasGhostResponse['action'], status: CanvasGhostResponse['status'], reason?: string) => void;
   /** Main process pushed a HUD state update. */
   onHUDState: (callback: (payload: CanvasHUDPayload) => void) => void;
 }
