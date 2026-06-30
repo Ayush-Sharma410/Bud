@@ -82,18 +82,24 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
     return { controller, wm };
   }
 
-  function captureSend(wm: any) {
+  function captureSend(wm: any, controller?: any) {
     const sent: Array<{ channel: string; data: any }> = [];
     wm.openOrFocus = async () => wm.getWindow() as any;
     (wm as any).sendToCanvas = (channel: string, data: any) => {
       sent.push({ channel, data });
+      if (channel === 'canvas:request-snapshot' && controller) {
+        controller.handleSnapshotResponse({
+          requestId: data.requestId,
+          snapshot: { sceneVersion: 1, elements: [], timestamp: Date.now() },
+        });
+      }
     };
     return sent;
   }
 
   await test('proposeOperation creates a pending proposal and sends ghost IPC', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const result = await controller.proposeOperation({
       kind: 'create',
@@ -120,7 +126,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('confirmProposal applies the stored operation and clears ghosts', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const proposed = await controller.proposeOperation({
       kind: 'create',
@@ -165,7 +171,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('cancelProposal clears ghosts and does not apply', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const proposed = await controller.proposeOperation({
       kind: 'create',
@@ -193,7 +199,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('expired proposal cannot be confirmed and clears ghosts', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const proposed = await controller.proposeOperation(
       {
@@ -220,7 +226,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('unsupported/import proposal does not create ghosts', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const result = await controller.proposeOperation({
       kind: 'importScene',
@@ -234,7 +240,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('reviseProposal supersedes the old proposal and creates a new one', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const first = await controller.proposeOperation({
       kind: 'create',
@@ -278,7 +284,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('confirmProposal can commit a proposed delete operation', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const proposed = await controller.proposeOperation({
       kind: 'delete',
@@ -306,7 +312,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('proposeOperation supersedes an existing active proposal', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const first = await controller.proposeOperation({
       kind: 'create',
@@ -339,7 +345,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('proposeOperation review_options sends render-ghosts with options and no base operation ghost', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const optionA = {
       optionId: 'opt-a',
@@ -369,7 +375,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('confirmProposal applies only the selected option operations', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const optionA = {
       optionId: 'opt-a',
@@ -409,7 +415,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('confirmProposal without option returns selectOption and does not apply', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const optionA = {
       optionId: 'opt-a',
@@ -433,7 +439,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('clearProposals clears ghosts and does not apply', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     const proposed = await controller.proposeOperation({
       kind: 'create',
@@ -467,7 +473,7 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('clearProposals is idempotent when no proposal is active', async () => {
     const { controller, wm } = createController();
-    const sent = captureSend(wm);
+    const sent = captureSend(wm, controller);
 
     controller.clearProposals();
     controller.clearProposals();

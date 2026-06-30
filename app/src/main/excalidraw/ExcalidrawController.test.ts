@@ -155,12 +155,14 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
   await test('applyOperation create sends canvas:apply-scene and resolves', async () => {
     const wm = new ExcalidrawWindowManager();
     let opened = false;
+    let snapshotRequest: any = null;
     let applyRequest: any = null;
     wm.openOrFocus = async () => {
       opened = true;
       return wm.getWindow() as any;
     };
     (wm as any).sendToCanvas = (channel: string, data: any) => {
+      if (channel === 'canvas:request-snapshot') snapshotRequest = data;
       if (channel === 'canvas:apply-scene') applyRequest = data;
     };
 
@@ -181,6 +183,14 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     if (!opened) throw new Error('canvas was not opened before apply');
+    if (!snapshotRequest) throw new Error('canvas:request-snapshot was not sent before apply');
+    controller.handleSnapshotResponse({
+      requestId: snapshotRequest.requestId,
+      snapshot: { sceneVersion: 1, elements: [], timestamp: Date.now() },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
     if (!applyRequest) throw new Error('canvas:apply-scene was not sent');
     if (applyRequest.operations[0].kind !== 'create') throw new Error('expected create operation');
 
@@ -271,16 +281,18 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
 
   await test('applyOperation timeout resolves with structured error', async () => {
     const wm = new ExcalidrawWindowManager();
+    let snapshotRequest: any = null;
     let applyRequest: any = null;
     wm.openOrFocus = async () => wm.getWindow() as any;
     (wm as any).sendToCanvas = (channel: string, data: any) => {
+      if (channel === 'canvas:request-snapshot') snapshotRequest = data;
       if (channel === 'canvas:apply-scene') applyRequest = data;
     };
 
     const controller = new ExcalidrawController({ windowManager: wm, timeoutMs: 25 });
     controller.onSceneChange(makeScene());
 
-    const result = await controller.applyOperation({
+    const pending = controller.applyOperation({
       kind: 'create',
       elementType: 'rectangle',
       id: 'r-timeout',
@@ -290,7 +302,17 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
       height: 10,
     });
 
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    if (!snapshotRequest) throw new Error('canvas:request-snapshot was not sent');
+    controller.handleSnapshotResponse({
+      requestId: snapshotRequest.requestId,
+      snapshot: { sceneVersion: 1, elements: [], timestamp: Date.now() },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
     if (!applyRequest) throw new Error('canvas:apply-scene was not sent');
+    const result = await pending;
     if (result.status !== 'error') throw new Error(`expected error, got ${result.status}`);
     if (!result.reason.includes('timed out')) throw new Error(`reason missing timeout: ${result.reason}`);
   });

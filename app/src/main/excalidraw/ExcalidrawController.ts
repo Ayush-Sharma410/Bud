@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { ExcalidrawWindowManager } from './ExcalidrawWindowManager';
 import { classifyOperation } from './safetyGate';
+import { SnapshotRing } from './SnapshotRing';
 import type {
   ApplyResult,
   CanvasApplyRequest,
@@ -9,15 +10,25 @@ import type {
   CanvasGhostResponse,
   CanvasHUDPayload,
   CanvasHUDState,
+  CanvasRedoNativeRequest,
+  CanvasRedoNativeResponse,
   CanvasRenderGhostsRequest,
+  CanvasRestoreSnapshotRequest,
+  CanvasRestoreSnapshotResponse,
   CanvasSceneRequest,
   CanvasSceneResponse,
+  CanvasSnapshotRequest,
+  CanvasSnapshotResponse,
+  CanvasUndoNativeRequest,
+  CanvasUndoNativeResponse,
   ExcalidrawOperation,
   ExcalidrawProposal,
   ExcalidrawSessionState,
+  FullSceneSnapshot,
   ProposalOption,
   ProposalResult,
   SceneSummary,
+  UndoResult,
 } from './excalidrawTypes';
 
 import type { AppSettings } from '../settings';
@@ -44,6 +55,28 @@ interface PendingApply {
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
+
+interface PendingSnapshot {
+  resolve: (snapshot: FullSceneSnapshot) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingUndo {
+  requestId: string;
+  baselineVersion: number;
+  resolve: (result: UndoResult) => void;
+  timer: ReturnType<typeof setTimeout>;
+  settled: boolean;
+}
+
+interface PendingRestore {
+  resolve: (result: UndoResult) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingRedo extends PendingUndo {}
 
 /**
  * Main-process controller for the embedded Excalidraw canvas.
@@ -79,7 +112,14 @@ export class ExcalidrawController {
   private timeoutMs: number;
   private pendingScenes = new Map<string, PendingScene>();
   private pendingApplies = new Map<string, PendingApply>();
+  private pendingSnapshots = new Map<string, PendingSnapshot>();
   private latestScene: SceneSummary | null = null;
+
+  // S5 snapshot ring (Bud-applied operations only)
+  private snapshotRing = new SnapshotRing();
+  private pendingUndo: PendingUndo | null = null;
+  private pendingRedo: PendingRedo | null = null;
+  private pendingRestore: PendingRestore | null = null;
 
   // S2 session state
   private isSessionActive = false;
@@ -153,6 +193,15 @@ export class ExcalidrawController {
   /** Receive periodic scene summaries published by the renderer on every change. */
   onSceneChange(scene: SceneSummary): void {
     this.latestScene = scene;
+
+    // S5: a pending undo/redo is considered successful when the scene version
+    // changes from the baseline captured just before the command was sent.
+    if (this.pendingUndo && !this.pendingUndo.settled && scene.sceneVersion !== this.pendingUndo.baselineVersion) {
+      this.settleNativeUndo(scene.sceneVersion);
+    }
+    if (this.pendingRedo && !this.pendingRedo.settled && scene.sceneVersion !== this.pendingRedo.baselineVersion) {
+      this.settleNativeRedo(scene.sceneVersion);
+    }
   }
 
   /** Return the most recently observed scene summary, if any. */
@@ -200,11 +249,15 @@ export class ExcalidrawController {
    * Controller-internal confirmed apply path.
    *
    * Bypasses the safety gate and is only used to commit operations that have
-   * already been stored inside a proposal. Callers cannot pass raw scene JSON;
-   * the operations come from the proposal store.
+   * already been stored inside a proposal. Captures a pre-mutation full-scene
+   * snapshot before applying so the operation can be undone later.
    */
   private async commitOperations(operations: ExcalidrawOperation[]): Promise<ApplyResult> {
     await this.windowManager.openOrFocus();
+
+    // S5: capture the scene before we mutate it. Failures are logged but do not
+    // block the apply; the snapshot fallback simply won't be available.
+    await this.captureSnapshotForUndo();
 
     return new Promise<ApplyResult>((resolve, _reject) => {
       const requestId = randomUUID();
@@ -221,6 +274,58 @@ export class ExcalidrawController {
       const request: CanvasApplyRequest = { requestId, operations };
       this.windowManager.sendToCanvas('canvas:apply-scene', request);
     });
+  }
+
+  /**
+   * Request a private full-scene snapshot from the renderer and push it onto
+   * the undo ring. This is only used internally by the controller.
+   */
+  private async captureSnapshotForUndo(): Promise<void> {
+    try {
+      const snapshot = await this.requestSnapshot();
+      const settings = this.getExcalidrawSettings();
+      this.snapshotRing.push(snapshot, {
+        maxOperations: settings.snapshotRing.maxOperations,
+        maxAgeMs: settings.snapshotRing.maxAgeMs,
+      });
+    } catch (err: any) {
+      console.warn('⚠️ ExcalidrawController: failed to capture pre-mutation snapshot:', err?.message || err);
+    }
+  }
+
+  /**
+   * Ask the renderer for a full internal scene snapshot (elements + appState).
+   * This snapshot is never returned to LLM/tool callers.
+   */
+  async requestSnapshot(): Promise<FullSceneSnapshot> {
+    await this.windowManager.openOrFocus();
+
+    return new Promise<FullSceneSnapshot>((resolve, reject) => {
+      const requestId = randomUUID();
+      const timer = setTimeout(() => {
+        this.pendingSnapshots.delete(requestId);
+        reject(new Error(`requestSnapshot timed out after ${this.timeoutMs}ms`));
+      }, this.timeoutMs);
+
+      this.pendingSnapshots.set(requestId, { resolve, reject, timer });
+
+      this.windowManager.sendToCanvas('canvas:request-snapshot', {
+        requestId,
+      } as CanvasSnapshotRequest);
+    });
+  }
+
+  /** Handle a renderer response to a prior `requestSnapshot()` call. */
+  handleSnapshotResponse(response: CanvasSnapshotResponse): void {
+    const pending = this.pendingSnapshots.get(response.requestId);
+    if (!pending) {
+      console.warn(`⚠️ ExcalidrawController: unmatched snapshot response ${response.requestId}`);
+      return;
+    }
+
+    clearTimeout(pending.timer);
+    this.pendingSnapshots.delete(response.requestId);
+    pending.resolve(response.snapshot);
   }
 
   /** Handle a renderer response to a prior `applyOperation(...)` request. */
@@ -474,6 +579,182 @@ export class ExcalidrawController {
         response.reason,
       );
     }
+  }
+
+  // --- S5: undo / redo -------------------------------------------------------
+
+  /**
+   * Undo the last Bud-applied mutation.
+   *
+   * 1. If the snapshot ring is empty, there is nothing controller-owned to undo.
+   * 2. Try Excalidraw's native undo (CommandOrControl+Z) in the renderer.
+   * 3. If the scene version does not change within the timeout, fall back to
+   *    restoring the most recent controller-managed snapshot.
+   */
+  async undo(): Promise<UndoResult> {
+    if (this.snapshotRing.isEmpty()) {
+      return { status: 'nothingToUndo' };
+    }
+
+    // Drop any active proposal/ghosts before reverting so ghosts do not become
+    // part of the restored scene.
+    this.clearProposals();
+
+    await this.windowManager.openOrFocus();
+    const baselineVersion = this.latestScene?.sceneVersion ?? (await this.readScene()).sceneVersion;
+
+    return new Promise<UndoResult>((resolve) => {
+      const requestId = randomUUID();
+      const timer = setTimeout(() => {
+        if (this.pendingUndo?.requestId === requestId) {
+          this.pendingUndo = null;
+          this.restoreSnapshotFallback(resolve, baselineVersion);
+        }
+      }, this.timeoutMs);
+
+      this.pendingUndo = {
+        requestId,
+        baselineVersion,
+        resolve,
+        timer,
+        settled: false,
+      };
+
+      this.windowManager.sendToCanvas('canvas:undo-native', {
+        requestId,
+      } as CanvasUndoNativeRequest);
+    });
+  }
+
+  /** Handle the renderer's acknowledgement after a native undo attempt. */
+  handleUndoNativeResponse(response: CanvasUndoNativeResponse): void {
+    if (!this.pendingUndo || this.pendingUndo.requestId !== response.requestId) {
+      return;
+    }
+
+    if (response.changed === true ||
+      (response.sceneVersion !== undefined && response.sceneVersion !== this.pendingUndo.baselineVersion)) {
+      this.settleNativeUndo(response.sceneVersion ?? this.latestScene?.sceneVersion ?? this.pendingUndo.baselineVersion);
+      return;
+    }
+
+    // The renderer reported no change. Do not settle yet — wait for the next
+    // `canvas:scene-change` or the undo timeout. This avoids races where the
+    // scene change event arrives after the explicit response.
+  }
+
+  private settleNativeUndo(sceneVersion?: number): void {
+    const pending = this.pendingUndo;
+    if (!pending || pending.settled) return;
+    pending.settled = true;
+    this.pendingUndo = null;
+    clearTimeout(pending.timer);
+
+    // Remove the snapshot that corresponds to the now-undone operation.
+    this.snapshotRing.pop();
+
+    const finalVersion = sceneVersion ?? this.latestScene?.sceneVersion ?? pending.baselineVersion;
+    pending.resolve({ status: 'undone', via: 'native', sceneVersion: finalVersion });
+  }
+
+  /**
+   * Best-effort redo after a successful undo.
+   *
+   * Uses Excalidraw's native redo shortcut (CommandOrControl+Y or
+   * CommandOrControl+Shift+Z). There is no snapshot fallback because controller
+   // driven mutations can invalidate Excalidraw's history stack.
+   */
+  async redo(): Promise<UndoResult> {
+    await this.windowManager.openOrFocus();
+    const baselineVersion = this.latestScene?.sceneVersion ?? (await this.readScene()).sceneVersion;
+
+    return new Promise<UndoResult>((resolve) => {
+      const requestId = randomUUID();
+      const timer = setTimeout(() => {
+        if (this.pendingRedo?.requestId === requestId) {
+          this.pendingRedo = null;
+          resolve({ status: 'nothingToUndo' });
+        }
+      }, this.timeoutMs);
+
+      this.pendingRedo = {
+        requestId,
+        baselineVersion,
+        resolve,
+        timer,
+        settled: false,
+      };
+
+      this.windowManager.sendToCanvas('canvas:redo-native', {
+        requestId,
+      } as CanvasRedoNativeRequest);
+    });
+  }
+
+  /** Handle the renderer's acknowledgement after a native redo attempt. */
+  handleRedoNativeResponse(response: CanvasRedoNativeResponse): void {
+    if (!this.pendingRedo || this.pendingRedo.requestId !== response.requestId) {
+      return;
+    }
+
+    if (response.changed === true ||
+      (response.sceneVersion !== undefined && response.sceneVersion !== this.pendingRedo.baselineVersion)) {
+      this.settleNativeRedo(response.sceneVersion ?? this.latestScene?.sceneVersion ?? this.pendingRedo.baselineVersion);
+    }
+  }
+
+  private settleNativeRedo(sceneVersion?: number): void {
+    const pending = this.pendingRedo;
+    if (!pending || pending.settled) return;
+    pending.settled = true;
+    this.pendingRedo = null;
+    clearTimeout(pending.timer);
+
+    const finalVersion = sceneVersion ?? this.latestScene?.sceneVersion ?? pending.baselineVersion;
+    pending.resolve({ status: 'undone', via: 'native', sceneVersion: finalVersion });
+  }
+
+  /** Handle the renderer's response to a snapshot restore request. */
+  handleRestoreSnapshotResponse(response: CanvasRestoreSnapshotResponse): void {
+    const pending = this.pendingRestore;
+    if (!pending) {
+      console.warn(`⚠️ ExcalidrawController: unmatched restore-snapshot response ${response.requestId}`);
+      return;
+    }
+
+    clearTimeout(pending.timer);
+    this.pendingRestore = null;
+
+    if (response.result.status === 'restored') {
+      pending.resolve({
+        status: 'undone',
+        via: 'snapshot',
+        sceneVersion: response.result.sceneVersion ?? this.latestScene?.sceneVersion ?? 0,
+      });
+    } else {
+      pending.resolve({ status: 'error', reason: response.result.reason || 'Snapshot restore failed.' });
+    }
+  }
+
+  private restoreSnapshotFallback(resolve: (result: UndoResult) => void, _baselineVersion: number): void {
+    const snapshot = this.snapshotRing.pop();
+    if (!snapshot) {
+      resolve({ status: 'nothingToUndo' });
+      return;
+    }
+
+    const requestId = randomUUID();
+    const timer = setTimeout(() => {
+      this.pendingRestore = null;
+      resolve({ status: 'error', reason: `restoreSnapshot timed out after ${this.timeoutMs}ms` });
+    }, this.timeoutMs);
+
+    this.pendingRestore = { resolve, reject: () => {}, timer };
+
+    this.windowManager.sendToCanvas('canvas:restore-snapshot', {
+      requestId,
+      snapshot,
+    } as CanvasRestoreSnapshotRequest);
   }
 
   /** Return a copy of the in-memory proposals for introspection/testing. */

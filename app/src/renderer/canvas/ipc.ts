@@ -18,12 +18,21 @@ import type {
   CanvasApplyRequest,
   CanvasClearGhostsRequest,
   CanvasGhostResponse,
+  CanvasRedoNativeRequest,
+  CanvasRedoNativeResponse,
   CanvasRenderGhostsRequest,
+  CanvasRestoreSnapshotRequest,
+  CanvasRestoreSnapshotResponse,
   CanvasSceneRequest,
+  CanvasSnapshotRequest,
+  CanvasSnapshotResponse,
+  CanvasUndoNativeRequest,
+  CanvasUndoNativeResponse,
   CreateElementOperation,
   ElementChanges,
   ExcalidrawElementType as SummaryElementType,
   ExcalidrawOperation,
+  FullSceneSnapshot,
   GhostElementPayload,
   GhostOptionPayload,
   GhostPayload,
@@ -117,6 +126,110 @@ export function initCanvasIPC(): void {
       window.budCanvasAPI.sendGhostResponse(request.proposalId ?? '', 'cleared', 'error', err?.message ?? String(err));
     }
   });
+
+  // --- S5: snapshot + undo + redo --------------------------------------------
+
+  window.budCanvasAPI.onRequestSnapshot((request: CanvasSnapshotRequest) => {
+    if (!apiRef) {
+      window.budCanvasAPI.sendSnapshotResponse(request.requestId, {
+        sceneVersion: 0,
+        elements: [],
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    try {
+      const elements = apiRef.getSceneElementsIncludingDeleted().filter((el) => !isGhostElement(el));
+      const appState = apiRef.getAppState();
+      window.budCanvasAPI.sendSnapshotResponse(request.requestId, {
+        sceneVersion: getSceneVersion(elements),
+        elements,
+        appState: pickSafeAppState(appState),
+        timestamp: Date.now(),
+      });
+    } catch (err: any) {
+      window.budCanvasAPI.sendSnapshotResponse(request.requestId, {
+        sceneVersion: 0,
+        elements: [],
+        timestamp: Date.now(),
+      });
+    }
+  });
+
+  window.budCanvasAPI.onUndoNative((request: CanvasUndoNativeRequest) => {
+    if (!apiRef) {
+      window.budCanvasAPI.sendUndoNativeResponse(request.requestId, undefined, false);
+      return;
+    }
+
+    try {
+      const beforeVersion = getSceneVersion(apiRef.getSceneElementsIncludingDeleted().filter((el) => !isGhostElement(el)));
+      dispatchShortcut('z', { shift: false });
+
+      // Give Excalidraw a tick to process the shortcut, then report whether
+      // the scene version changed.
+      setTimeout(() => {
+        const afterElements = apiRef!.getSceneElementsIncludingDeleted().filter((el) => !isGhostElement(el));
+        const afterVersion = getSceneVersion(afterElements);
+        window.budCanvasAPI.sendUndoNativeResponse(request.requestId, afterVersion, afterVersion !== beforeVersion);
+      }, 80);
+    } catch (err: any) {
+      window.budCanvasAPI.sendUndoNativeResponse(request.requestId, undefined, false);
+    }
+  });
+
+  window.budCanvasAPI.onRedoNative((request: CanvasRedoNativeRequest) => {
+    if (!apiRef) {
+      window.budCanvasAPI.sendRedoNativeResponse(request.requestId, undefined, false);
+      return;
+    }
+
+    try {
+      const beforeVersion = getSceneVersion(apiRef.getSceneElementsIncludingDeleted().filter((el) => !isGhostElement(el)));
+      dispatchShortcut('y', { shift: false });
+
+      setTimeout(() => {
+        const afterElements = apiRef!.getSceneElementsIncludingDeleted().filter((el) => !isGhostElement(el));
+        const afterVersion = getSceneVersion(afterElements);
+        window.budCanvasAPI.sendRedoNativeResponse(request.requestId, afterVersion, afterVersion !== beforeVersion);
+      }, 80);
+    } catch (err: any) {
+      window.budCanvasAPI.sendRedoNativeResponse(request.requestId, undefined, false);
+    }
+  });
+
+  window.budCanvasAPI.onRestoreSnapshot((request: CanvasRestoreSnapshotRequest) => {
+    if (!apiRef) {
+      window.budCanvasAPI.sendRestoreSnapshotResponse(request.requestId, { status: 'error', reason: 'Excalidraw API not mounted yet.' });
+      return;
+    }
+
+    try {
+      // Ensure no proposal ghosts become real scene state after the restore.
+      const current = apiRef.getSceneElementsIncludingDeleted();
+      const cleaned = removeGhosts(current);
+      const restoredElements = (request.snapshot.elements as ExcalidrawElement[]) ?? [];
+      apiRef.updateScene({
+        elements: restoredElements,
+        appState: request.snapshot.appState as any,
+        captureUpdate: CaptureUpdateAction.IMMEDIATELY,
+      });
+
+      // Also remove any ghosts that were still present in the current scene so
+      // they do not survive alongside the restored snapshot.
+      const afterElements = apiRef.getSceneElementsIncludingDeleted();
+      const finalElements = removeGhosts(afterElements);
+      if (finalElements.length !== afterElements.length) {
+        apiRef.updateScene({ elements: finalElements, captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+      }
+
+      const sceneVersion = getSceneVersion(finalElements.filter((el) => !isGhostElement(el)));
+      window.budCanvasAPI.sendRestoreSnapshotResponse(request.requestId, { status: 'restored', sceneVersion });
+    } catch (err: any) {
+      window.budCanvasAPI.sendRestoreSnapshotResponse(request.requestId, { status: 'error', reason: err?.message ?? String(err) });
+    }
+  });
 }
 
 function emptySceneSummary(): SceneSummary {
@@ -128,6 +241,37 @@ function emptySceneSummary(): SceneSummary {
     deletedCount: 0,
     elements: [],
   };
+}
+
+function pickSafeAppState(appState: AppState): Record<string, any> {
+  return {
+    zoom: appState.zoom,
+    scrollX: appState.scrollX,
+    scrollY: appState.scrollY,
+    viewBackgroundColor: appState.viewBackgroundColor,
+    selectedElementIds: appState.selectedElementIds,
+    theme: appState.theme,
+  };
+}
+
+function dispatchShortcut(key: string, opts: { shift: boolean }): void {
+  const isMac = navigator.platform.toLowerCase().includes('mac');
+  const baseInit: KeyboardEventInit = {
+    key,
+    code: `Key${key.toUpperCase()}`,
+    ctrlKey: !isMac,
+    metaKey: isMac,
+    shiftKey: opts.shift,
+    bubbles: true,
+    cancelable: true,
+  };
+
+  try {
+    window.dispatchEvent(new KeyboardEvent('keydown', baseInit));
+    window.dispatchEvent(new KeyboardEvent('keyup', baseInit));
+  } catch {
+    // Some test environments may not have a real `window`; fall back silently.
+  }
 }
 
 function buildSceneSummary(elements: readonly ExcalidrawElement[], appState: AppState): SceneSummary {

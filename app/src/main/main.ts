@@ -84,7 +84,7 @@ import { AnnotationController } from './annotations/AnnotationController';
 import { createDrawAnnotationTools } from './annotations/createDrawAnnotationTool';
 import { ExcalidrawWindowManager } from './excalidraw/ExcalidrawWindowManager';
 import { ExcalidrawController } from './excalidraw/ExcalidrawController';
-import type { CanvasApplyResponse, CanvasGhostResponse, CanvasSceneResponse, SceneSummary } from './excalidraw/excalidrawTypes';
+import type { CanvasApplyResponse, CanvasGhostResponse, CanvasRedoNativeResponse, CanvasRestoreSnapshotResponse, CanvasSceneResponse, CanvasSnapshotResponse, CanvasUndoNativeResponse, SceneSummary } from './excalidraw/excalidrawTypes';
 
 // Prevent multiple instances
 const gotTheLock = app.requestSingleInstanceLock();
@@ -193,7 +193,24 @@ app.whenReady().then(async () => {
     excalidrawController.handleGhostResponse(response);
   });
 
-  console.log('🎨 Excalidraw canvas controller initialized (S1/S2/S3/S4)');
+  // S5: snapshot ring + undo + redo
+  ipcMain.on('canvas:snapshot-response', (_event, response: CanvasSnapshotResponse) => {
+    excalidrawController.handleSnapshotResponse(response);
+  });
+
+  ipcMain.on('canvas:undo-native-response', (_event, response: CanvasUndoNativeResponse) => {
+    excalidrawController.handleUndoNativeResponse(response);
+  });
+
+  ipcMain.on('canvas:restore-snapshot-response', (_event, response: CanvasRestoreSnapshotResponse) => {
+    excalidrawController.handleRestoreSnapshotResponse(response);
+  });
+
+  ipcMain.on('canvas:redo-native-response', (_event, response: CanvasRedoNativeResponse) => {
+    excalidrawController.handleRedoNativeResponse(response);
+  });
+
+  console.log('🎨 Excalidraw canvas controller initialized (S1/S2/S3/S4/S5)');
 
   // 3. Create audio playback manager (uses overlay window for audio)
   audioPlayback = new AudioPlaybackManager();

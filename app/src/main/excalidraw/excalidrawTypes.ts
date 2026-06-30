@@ -256,10 +256,21 @@ export type ApplyResult =
   | { status: 'selectOption'; proposalId: string; optionIds: string[] }
   | { status: 'error'; reason: string };
 
-/** S5+ undo result shape. Stub only for S1. */
+/** Full-scene snapshot kept internally between the controller and renderer for undo fallback. */
+export interface FullSceneSnapshot {
+  sceneVersion: number;
+  /** Full Excalidraw element array (opaque to the controller; passed back to `updateScene`). */
+  elements: any[];
+  /** Minimal serializable app-state slice required to restore the view. */
+  appState?: Record<string, any>;
+  timestamp: number;
+}
+
+/** S5+ undo result shape. */
 export type UndoResult =
   | { status: 'undone'; via: 'native' | 'snapshot'; sceneVersion: number }
-  | { status: 'nothingToUndo' };
+  | { status: 'nothingToUndo' }
+  | { status: 'error'; reason: string };
 
 /** S2+ HUD status pill states. */
 export type CanvasHUDState =
@@ -284,6 +295,53 @@ export interface CanvasApplyRequest {
 export interface CanvasApplyResponse {
   requestId: string;
   result: ApplyResult;
+}
+
+/** S5 main -> renderer: request a private full-scene snapshot for the snapshot ring. */
+export interface CanvasSnapshotRequest {
+  requestId: string;
+}
+
+/** S5 renderer -> main: full-scene snapshot response (controller-internal, never exposed to prompts). */
+export interface CanvasSnapshotResponse {
+  requestId: string;
+  snapshot: FullSceneSnapshot;
+}
+
+/** S5 main -> renderer: trigger Excalidraw's native undo shortcut. */
+export interface CanvasUndoNativeRequest {
+  requestId: string;
+}
+
+/** S5 renderer -> main: result of a native undo attempt. */
+export interface CanvasUndoNativeResponse {
+  requestId: string;
+  sceneVersion?: number;
+  changed?: boolean;
+}
+
+/** S5 main -> renderer: restore a controller-managed snapshot. */
+export interface CanvasRestoreSnapshotRequest {
+  requestId: string;
+  snapshot: FullSceneSnapshot;
+}
+
+/** S5 renderer -> main: result of a snapshot restore. */
+export interface CanvasRestoreSnapshotResponse {
+  requestId: string;
+  result: { status: 'restored' | 'error'; sceneVersion?: number; reason?: string };
+}
+
+/** S5 main -> renderer: trigger Excalidraw's native redo shortcut. */
+export interface CanvasRedoNativeRequest {
+  requestId: string;
+}
+
+/** S5 renderer -> main: result of a native redo attempt. */
+export interface CanvasRedoNativeResponse {
+  requestId: string;
+  sceneVersion?: number;
+  changed?: boolean;
 }
 
 /** S4 main -> renderer: render a proposal as translucent/dashed ghost elements. */
