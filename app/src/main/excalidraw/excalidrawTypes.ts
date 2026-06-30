@@ -6,6 +6,35 @@
  * are stubbed here for type continuity with later slices but are not wired up.
  */
 
+export interface GhostElementPayload {
+  id: string;
+  type: ExcalidrawElementType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  text?: string;
+  strokeColor?: string;
+  backgroundColor?: string;
+  strokeWidth?: number;
+  roughness?: number;
+  opacity?: number;
+  angle?: number;
+  fillStyle?: 'hachure' | 'cross-hatch' | 'solid' | 'zigzag';
+  strokeStyle?: 'solid' | 'dashed' | 'dotted';
+  /** Runtime ghost marker. Kept generic so real Excalidraw elements are assignable. */
+  customData?: Record<string, any>;
+}
+
+export interface GhostPayload {
+  proposalId: string;
+  mode: 'diagram_patch' | 'review_options';
+  ghosts: GhostElementPayload[];
+  options?: GhostOptionPayload[];
+  reason?: string;
+  expiresAt: number;
+}
+
 /** Element types we expect to summarize back to prompts. */
 export type ExcalidrawElementType =
   | 'rectangle'
@@ -258,25 +287,6 @@ export interface CanvasApplyResponse {
 }
 
 /** S4 main -> renderer: render a proposal as translucent/dashed ghost elements. */
-export interface GhostElementPayload {
-  id: string;
-  type: ExcalidrawElementType;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  text?: string;
-  strokeColor?: string;
-  backgroundColor?: string;
-  strokeWidth?: number;
-  roughness?: number;
-  opacity?: number;
-  angle?: number;
-  fillStyle?: 'hachure' | 'cross-hatch' | 'solid' | 'zigzag';
-  strokeStyle?: 'solid' | 'dashed' | 'dotted';
-  customData: { proposalId: string; ghost: true; originalId?: string };
-}
-
 export interface GhostOptionPayload {
   optionId: string;
   title: string;
@@ -284,14 +294,15 @@ export interface GhostOptionPayload {
   ghostIds: string[];
 }
 
-export interface GhostPayload {
-  proposalId: string;
-  mode: 'diagram_patch' | 'review_options';
-  ghosts: GhostElementPayload[];
-  options?: GhostOptionPayload[];
-  reason?: string;
-  expiresAt: number;
-}
+/**
+ * Shared types for the embedded Excalidraw canvas copilot.
+ *
+ * Phase 1 Slice S1 uses only the scene-reading contract (`SceneSummary`,
+ * `CanvasSceneRequest`, `CanvasSceneResponse`). Operation/proposal/undo types
+ * are stubbed here for type continuity with later slices but are not wired up.
+ */
+
+/** Element types we expect to summarize back to prompts. */
 
 export interface CanvasRenderGhostsRequest {
   proposalId: string;

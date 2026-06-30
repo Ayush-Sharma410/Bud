@@ -337,5 +337,147 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
     if (clears[0].data.proposalId !== first.proposalId) throw new Error('superseded clear id mismatch');
   });
 
+  await test('proposeOperation review_options sends render-ghosts with options and no base operation ghost', async () => {
+    const { controller, wm } = createController();
+    const sent = captureSend(wm);
+
+    const optionA = {
+      optionId: 'opt-a',
+      title: 'Option A',
+      operations: [{ kind: 'create', elementType: 'rectangle', id: 'r-a', x: 0, y: 0, width: 10, height: 10 } as const],
+    };
+    const optionB = {
+      optionId: 'opt-b',
+      title: 'Option B',
+      operations: [{ kind: 'create', elementType: 'rectangle', id: 'r-b', x: 20, y: 20, width: 10, height: 10 } as const],
+    };
+
+    const result = await controller.proposeOperation(
+      { kind: 'create', elementType: 'rectangle', id: 'r-base', x: 0, y: 0, width: 10, height: 10 },
+      { mode: 'review_options', options: [optionA, optionB] },
+    );
+    if (result.status !== 'pending') throw new Error(`expected pending, got ${result.status}`);
+
+    const render = sent.find((s) => s.channel === 'canvas:render-ghosts');
+    if (!render) throw new Error('canvas:render-ghosts was not sent');
+    if (render.data.mode !== 'review_options') throw new Error(`expected review_options mode, got ${render.data.mode}`);
+    if (render.data.operations.length !== 0) throw new Error('review_options should not send accidental base operation ghosts');
+    if (!Array.isArray(render.data.options) || render.data.options.length !== 2) {
+      throw new Error(`expected 2 options, got ${JSON.stringify(render.data.options)}`);
+    }
+  });
+
+  await test('confirmProposal applies only the selected option operations', async () => {
+    const { controller, wm } = createController();
+    const sent = captureSend(wm);
+
+    const optionA = {
+      optionId: 'opt-a',
+      title: 'Option A',
+      operations: [{ kind: 'create', elementType: 'rectangle', id: 'r-a', x: 0, y: 0, width: 10, height: 10 } as const],
+    };
+    const optionB = {
+      optionId: 'opt-b',
+      title: 'Option B',
+      operations: [{ kind: 'create', elementType: 'text', id: 't-b', x: 30, y: 30, width: 50, height: 20, text: 'B' } as const],
+    };
+
+    const proposed = await controller.proposeOperation(
+      { kind: 'create', elementType: 'rectangle', id: 'r-base', x: 0, y: 0, width: 10, height: 10 },
+      { mode: 'review_options', options: [optionA, optionB] },
+    );
+    if (proposed.status !== 'pending') throw new Error(`expected pending, got ${proposed.status}`);
+
+    const confirmPromise = controller.confirmProposal(proposed.proposalId, 'opt-b');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const apply = sent.find((s) => s.channel === 'canvas:apply-scene');
+    if (!apply) throw new Error('canvas:apply-scene was not sent on confirm');
+    if (apply.data.operations.length !== 1) throw new Error('expected exactly one operation from option B');
+    if (apply.data.operations[0].kind !== 'create' || (apply.data.operations[0] as any).id !== 't-b') {
+      throw new Error('expected option B text operation to be applied');
+    }
+
+    controller.handleApplyResponse({
+      requestId: apply.data.requestId,
+      result: { status: 'applied', sceneVersion: 2, affectedIds: ['t-b'], affectedCount: 1 },
+    });
+
+    const result = await confirmPromise;
+    if (result.status !== 'applied') throw new Error(`expected applied, got ${result.status}`);
+  });
+
+  await test('confirmProposal without option returns selectOption and does not apply', async () => {
+    const { controller, wm } = createController();
+    const sent = captureSend(wm);
+
+    const optionA = {
+      optionId: 'opt-a',
+      title: 'Option A',
+      operations: [{ kind: 'create', elementType: 'rectangle', id: 'r-a', x: 0, y: 0, width: 10, height: 10 } as const],
+    };
+
+    const proposed = await controller.proposeOperation(
+      { kind: 'create', elementType: 'rectangle', id: 'r-base', x: 0, y: 0, width: 10, height: 10 },
+      { mode: 'review_options', options: [optionA] },
+    );
+    if (proposed.status !== 'pending') throw new Error(`expected pending, got ${proposed.status}`);
+
+    const result = await controller.confirmProposal(proposed.proposalId);
+    if (result.status !== 'selectOption') throw new Error(`expected selectOption, got ${result.status}`);
+    if ((result as any).optionIds?.[0] !== 'opt-a') throw new Error('expected optionIds to include opt-a');
+
+    const apply = sent.find((s) => s.channel === 'canvas:apply-scene');
+    if (apply) throw new Error('canvas:apply-scene should not be sent without an option');
+  });
+
+  await test('clearProposals clears ghosts and does not apply', async () => {
+    const { controller, wm } = createController();
+    const sent = captureSend(wm);
+
+    const proposed = await controller.proposeOperation({
+      kind: 'create',
+      elementType: 'rectangle',
+      id: 'r-clearall',
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+    if (proposed.status !== 'pending') throw new Error(`expected pending, got ${proposed.status}`);
+
+    controller.clearProposals();
+
+    const apply = sent.find((s) => s.channel === 'canvas:apply-scene');
+    if (apply) throw new Error('canvas:apply-scene should not be sent on clearProposals');
+
+    const clear = sent.filter((s) => s.channel === 'canvas:clear-ghosts').pop();
+    if (!clear) throw new Error('canvas:clear-ghosts should be sent on clearProposals');
+    if (clear.data.proposalId !== proposed.proposalId) throw new Error('clear ghosts id mismatch');
+
+    const proposals = controller.getProposals();
+    const status = proposals.get(proposed.proposalId)?.status;
+    if (status !== 'superseded' && status !== 'cancelled') {
+      throw new Error(`expected proposal to be superseded/cancelled, got ${status}`);
+    }
+
+    const afterClear = await controller.confirmProposal(proposed.proposalId);
+    if (afterClear.status !== 'not_found') throw new Error(`expected not_found after clear, got ${afterClear.status}`);
+  });
+
+  await test('clearProposals is idempotent when no proposal is active', async () => {
+    const { controller, wm } = createController();
+    const sent = captureSend(wm);
+
+    controller.clearProposals();
+    controller.clearProposals();
+
+    const clear = sent.find((s) => s.channel === 'canvas:clear-ghosts');
+    if (clear) throw new Error('canvas:clear-ghosts should not be sent when no proposals exist');
+
+    const hud = sent.find((s) => s.channel === 'canvas:hud');
+    if (hud) throw new Error('HUD should not change when no proposals exist');
+  });
+
   console.log('\n🎉 ExcalidrawController S4 proposal tests passed');
 })();

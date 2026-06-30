@@ -24,6 +24,9 @@ import type {
   ElementChanges,
   ExcalidrawElementType as SummaryElementType,
   ExcalidrawOperation,
+  GhostElementPayload,
+  GhostOptionPayload,
+  GhostPayload,
   SceneSummary,
 } from '../../main/excalidraw/excalidrawTypes';
 
@@ -89,10 +92,10 @@ export function initCanvasIPC(): void {
     }
 
     try {
-      const ghosts = buildGhostElements(apiRef, request.operations, request.proposalId);
+      const payload = buildGhostPayload(apiRef, request);
       const current = apiRef.getSceneElementsIncludingDeleted();
       const cleaned = removeGhosts(current, request.proposalId);
-      apiRef.updateScene({ elements: [...cleaned, ...ghosts], captureUpdate: CaptureUpdateAction.IMMEDIATELY });
+      apiRef.updateScene({ elements: [...cleaned, ...(payload.ghosts as ExcalidrawElement[])], captureUpdate: CaptureUpdateAction.IMMEDIATELY });
       window.budCanvasAPI.sendGhostResponse(request.proposalId, 'rendered', 'ok');
     } catch (err: any) {
       window.budCanvasAPI.sendGhostResponse(request.proposalId, 'rendered', 'error', err?.message ?? String(err));
@@ -418,11 +421,13 @@ function toGhostElement<T extends ExcalidrawElement>(
   element: T,
   proposalId: string,
   originalId?: string,
+  optionId?: string,
 ): T {
-  const ghostId = `ghost-${proposalId.slice(0, 8)}-${element.id}`;
+  const optionSegment = optionId ? `${optionId}-` : '';
+  const ghostId = `ghost-${proposalId.slice(0, 8)}-${optionSegment}${element.id}`;
   const mutable = { ...element } as Record<string, any>;
   mutable.id = ghostId;
-  mutable.customData = { proposalId, ghost: true, originalId };
+  mutable.customData = { proposalId, ghost: true, optionId, originalId };
   mutable.strokeStyle = 'dashed';
   mutable.opacity = 40;
   mutable.groupIds = [];
@@ -434,16 +439,112 @@ function toGhostElement<T extends ExcalidrawElement>(
   return mutable as T;
 }
 
-function buildGhostElements(
+/** Per-option stroke tints so review-options ghost sets are visually distinct. */
+const OPTION_TINTS = [
+  '#f76707', // orange
+  '#15aabf', // cyan
+  '#ae3ec9', // violet
+  '#40c057', // green
+  '#4c6ef5', // blue
+];
+
+function optionTint(index: number): string {
+  return OPTION_TINTS[index % OPTION_TINTS.length];
+}
+
+function buildGhostPayload(
   api: ExcalidrawImperativeAPI,
-  operations: readonly ExcalidrawOperation[],
-  proposalId: string,
-): ExcalidrawElement[] {
+  request: CanvasRenderGhostsRequest,
+): GhostPayload {
+  const proposalId = request.proposalId;
+  const mode = request.mode ?? 'diagram_patch';
+
+  if (mode === 'review_options') {
+    const sceneElements = api.getSceneElementsIncludingDeleted();
+    const byId = new Map<string, ExcalidrawElement>(sceneElements.map((el) => [el.id, el]));
+    const allGhosts: ExcalidrawElement[] = [];
+    const optionPayloads: GhostOptionPayload[] = [];
+
+    const options = request.options ?? [];
+    for (let i = 0; i < options.length; i++) {
+      const option = options[i];
+      const tint = optionTint(i);
+      const offset = i * 4;
+      const optionGhostIds: string[] = [];
+
+      for (const op of option.operations) {
+        switch (op.kind) {
+          case 'create': {
+            const created = createElementFromOperation(op as CreateElementOperation);
+            const ghost = toGhostElement(created, proposalId, undefined, option.optionId) as Record<string, any>;
+            ghost.strokeColor = tint;
+            ghost.x += offset;
+            ghost.y += offset;
+            optionGhostIds.push(ghost.id);
+            allGhosts.push(ghost as ExcalidrawElement);
+            break;
+          }
+          case 'update': {
+            const ids = op.ids ?? [];
+            for (const id of ids) {
+              const existing = byId.get(id);
+              if (!existing || isGhostElement(existing)) continue;
+              const changed = applyElementChanges(existing, op.changes);
+              const ghost = toGhostElement(changed, proposalId, id, option.optionId) as Record<string, any>;
+              ghost.strokeColor = tint;
+              ghost.x += offset;
+              ghost.y += offset;
+              optionGhostIds.push(ghost.id);
+              allGhosts.push(ghost as ExcalidrawElement);
+            }
+            break;
+          }
+          case 'delete': {
+            const ids = op.ids ?? [];
+            for (const id of ids) {
+              const existing = byId.get(id);
+              if (!existing || isGhostElement(existing)) continue;
+              const ghost = toGhostElement(existing, proposalId, id, option.optionId) as Record<string, any>;
+              ghost.strokeColor = '#e03131';
+              ghost.opacity = 55;
+              optionGhostIds.push(ghost.id);
+              allGhosts.push(ghost as ExcalidrawElement);
+            }
+            break;
+          }
+          case 'clearCanvas': {
+            break;
+          }
+          default: {
+            break;
+          }
+        }
+      }
+
+      optionPayloads.push({
+        optionId: option.optionId,
+        title: option.title,
+        rationale: option.rationale,
+        ghostIds: optionGhostIds,
+      });
+    }
+
+    return {
+      proposalId,
+      mode,
+      ghosts: allGhosts,
+      options: optionPayloads,
+      reason: request.reason,
+      expiresAt: request.expiresAt,
+    };
+  }
+
+  // diagram_patch: preserve single-option ghost behavior from the base operations.
   const sceneElements = api.getSceneElementsIncludingDeleted();
   const byId = new Map<string, ExcalidrawElement>(sceneElements.map((el) => [el.id, el]));
   const ghosts: ExcalidrawElement[] = [];
 
-  for (const op of operations) {
+  for (const op of request.operations) {
     switch (op.kind) {
       case 'create': {
         const created = createElementFromOperation(op as CreateElementOperation);
@@ -473,16 +574,19 @@ function buildGhostElements(
         break;
       }
       case 'clearCanvas': {
-        // No per-element ghost for a full clear; the proposal reason explains the change.
         break;
       }
       default: {
-        // Ghost rendering for align/distribute/group/ungroup/reorganizeLayout is not
-        // implemented in S4; the proposal still commits via the confirmed apply path.
         break;
       }
     }
   }
 
-  return ghosts;
+  return {
+    proposalId,
+    mode,
+    ghosts,
+    reason: request.reason,
+    expiresAt: request.expiresAt,
+  };
 }

@@ -293,7 +293,7 @@ export class ExcalidrawController {
     const proposal: ExcalidrawProposal = {
       proposalId,
       mode: opts?.mode ?? 'diagram_patch',
-      operations: [resolvedOp],
+      operations: opts?.mode === 'review_options' && opts?.options?.length ? [] : [resolvedOp],
       options: opts?.options,
       summary: opts?.summary ?? `${op.kind} proposal`,
       reason: opts?.reason ?? classification.reason,
@@ -434,6 +434,35 @@ export class ExcalidrawController {
           this.activeProposalId = null;
         }
       }
+    }
+  }
+
+  /**
+   * Clear all active/pending proposals without committing.
+   *
+   * Safe/idempotent when no proposal is active. Expired proposals are marked
+   * expired; remaining pending proposals are marked superseded. Ghosts are
+   * cleared, the active proposal id is reset, and the HUD returns to the
+   * session/idle state.
+   */
+  clearProposals(): void {
+    const now = Date.now();
+    let hadPending = false;
+    for (const [id, proposal] of this.proposals) {
+      if (proposal.status !== 'pending') continue;
+      hadPending = true;
+      if (now > proposal.expiresAt) {
+        proposal.status = 'expired';
+      } else {
+        proposal.status = 'superseded';
+      }
+      this.clearGhostsForProposal(id);
+      if (this.activeProposalId === id) {
+        this.activeProposalId = null;
+      }
+    }
+    if (hadPending) {
+      this.setHUDStateFromSession();
     }
   }
 
