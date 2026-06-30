@@ -173,6 +173,8 @@ app.whenReady().then(async () => {
   excalidrawWindowManager = new ExcalidrawWindowManager();
   excalidrawController = new ExcalidrawController({
     windowManager: excalidrawWindowManager,
+    getMuted: () => realtimeVoiceManager?.getMuted() ?? false,
+    toggleMute: () => realtimeVoiceManager?.toggleMute() ?? false,
   });
 
   ipcMain.on('canvas:scene-response', (_event, response: CanvasSceneResponse) => {
@@ -307,7 +309,7 @@ app.whenReady().then(async () => {
     console.warn('⚠️ No realtime API key configured — Realtime voice disabled');
   }
 
-  // 7. Register global hotkey → Agent kill switch + Mute toggle
+  // 7. Register global hotkey → Agent kill switch + Mute toggle + Canvas session toggle
   // Push-to-talk is disabled — Realtime pipeline is always-on
   globalHotkey = new GlobalHotkey({
     onPushToTalkStart: () => {
@@ -326,6 +328,12 @@ app.whenReady().then(async () => {
         console.log(`🎙️ Mute toggled: ${isMuted ? 'muted' : 'unmuted'}`);
       }
     },
+    onCanvasToggle: () => {
+      excalidrawController.toggleSession().catch((err) => {
+        console.error('⚠️ Excalidraw session toggle failed:', err);
+      });
+    },
+    canvasToggleAccelerator: currentSettings.excalidraw.toggleHotkey,
   });
 
   // 9. Spawn the Floating Pill panel on startup

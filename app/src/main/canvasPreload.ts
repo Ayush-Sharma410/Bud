@@ -5,7 +5,12 @@
  * panel/overlay renderers. The canvas renderer must not use Node APIs directly.
  */
 import { contextBridge, ipcRenderer } from 'electron';
-import type { CanvasSceneRequest, CanvasSceneResponse, SceneSummary } from './excalidraw/excalidrawTypes';
+import type {
+  CanvasHUDPayload,
+  CanvasSceneRequest,
+  CanvasSceneResponse,
+  SceneSummary,
+} from './excalidraw/excalidrawTypes';
 
 contextBridge.exposeInMainWorld('budCanvasAPI', {
   // Renderer -> main: request for a scene summary
@@ -23,5 +28,12 @@ contextBridge.exposeInMainWorld('budCanvasAPI', {
   // Renderer -> main publish: scene changed locally
   publishSceneChange: (scene: SceneSummary) => {
     ipcRenderer.send('canvas:scene-change', scene);
+  },
+
+  // Main -> renderer: HUD status updates
+  onHUDState: (callback: (payload: CanvasHUDPayload) => void) => {
+    ipcRenderer.on('canvas:hud', (_event, payload: CanvasHUDPayload) => {
+      callback(payload);
+    });
   },
 });

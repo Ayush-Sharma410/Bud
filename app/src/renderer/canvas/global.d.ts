@@ -1,4 +1,4 @@
-import type { CanvasSceneRequest, SceneSummary } from '../../main/excalidraw/excalidrawTypes';
+import type { CanvasHUDPayload, CanvasSceneRequest, SceneSummary } from '../../main/excalidraw/excalidrawTypes';
 
 export interface BudCanvasAPI {
   /** Main process asked the renderer for a scene summary. */
@@ -7,6 +7,8 @@ export interface BudCanvasAPI {
   requestSceneResponse: (requestId: string, scene: SceneSummary) => void;
   /** Notify the main process that the scene changed locally. */
   publishSceneChange: (scene: SceneSummary) => void;
+  /** Main process pushed a HUD state update. */
+  onHUDState: (callback: (payload: CanvasHUDPayload) => void) => void;
 }
 
 declare global {

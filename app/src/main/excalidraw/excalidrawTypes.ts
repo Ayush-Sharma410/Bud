@@ -116,3 +116,23 @@ export type ApplyResult =
 export type UndoResult =
   | { status: 'undone'; via: 'native' | 'snapshot'; sceneVersion: number }
   | { status: 'nothingToUndo' };
+
+/** S2+ HUD status pill states. */
+export type CanvasHUDState =
+  | 'idle'
+  | 'listening'
+  | 'speaking'
+  | 'proposalPending'
+  | 'saved';
+
+/** S2+ payload sent to the renderer to update the HUD. */
+export interface CanvasHUDPayload {
+  state: CanvasHUDState;
+}
+
+/** S2+ canvas voice-session state exposed by the controller. */
+export interface ExcalidrawSessionState {
+  isActive: boolean;
+  startedAt?: number;
+  hudState: CanvasHUDState;
+}

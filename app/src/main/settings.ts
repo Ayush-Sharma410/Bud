@@ -9,11 +9,50 @@ import path from 'path';
 import fs from 'fs';
 import { ProviderConfig, DEFAULT_PROVIDER_CONFIG } from './providers/types';
 
+export type CanvasTheme = 'light' | 'dark' | 'auto';
+
+export interface ExcalidrawSettings {
+  /** Accelerator that toggles the canvas voice session. */
+  toggleHotkey: string;
+  /** Directory where autosaved session files are written. */
+  saveDirectory: string;
+  /** Autosave interval in milliseconds. */
+  autosaveIntervalMs: number;
+  /** Canvas UI theme. */
+  theme: CanvasTheme;
+  /** Safety-gate thresholds for immediate vs. proposed edits. */
+  safetyThresholds: {
+    maxElementsPerImmediateApply: number;
+    maxElementsPerDelete: number;
+  };
+  /** Snapshot-ring limits for undo fallback. */
+  snapshotRing: {
+    maxOperations: number;
+    maxAgeMs: number;
+  };
+}
+
 export interface AppSettings extends ProviderConfig {
   cursorEnabled: boolean;
+  excalidraw: ExcalidrawSettings;
 }
 
 const SETTINGS_FILE = 'settings.json';
+
+const DEFAULT_EXCALIDRAW_SETTINGS: ExcalidrawSettings = {
+  toggleHotkey: 'CommandOrControl+Shift+Space',
+  saveDirectory: path.join(app.getPath('userData'), 'excalidraw-sessions'),
+  autosaveIntervalMs: 5000,
+  theme: 'auto',
+  safetyThresholds: {
+    maxElementsPerImmediateApply: 5,
+    maxElementsPerDelete: 3,
+  },
+  snapshotRing: {
+    maxOperations: 50,
+    maxAgeMs: 1_800_000, // 30 minutes
+  },
+};
 
 export class SettingsManager {
   private filePath: string;
@@ -43,6 +82,18 @@ export class SettingsManager {
             ...DEFAULT_PROVIDER_CONFIG.local,
             ...(parsed.local || {}),
           },
+          excalidraw: {
+            ...DEFAULT_EXCALIDRAW_SETTINGS,
+            ...(parsed.excalidraw || {}),
+            safetyThresholds: {
+              ...DEFAULT_EXCALIDRAW_SETTINGS.safetyThresholds,
+              ...(parsed.excalidraw?.safetyThresholds || {}),
+            },
+            snapshotRing: {
+              ...DEFAULT_EXCALIDRAW_SETTINGS.snapshotRing,
+              ...(parsed.excalidraw?.snapshotRing || {}),
+            },
+          },
         };
       }
     } catch (err) {
@@ -51,6 +102,7 @@ export class SettingsManager {
     return {
       ...DEFAULT_PROVIDER_CONFIG,
       cursorEnabled: true,
+      excalidraw: DEFAULT_EXCALIDRAW_SETTINGS,
     };
   }
 
@@ -69,6 +121,18 @@ export class SettingsManager {
       local: {
         ...this.currentSettings.local,
         ...(settings.local || {}),
+      },
+      excalidraw: {
+        ...this.currentSettings.excalidraw,
+        ...(settings.excalidraw || {}),
+        safetyThresholds: {
+          ...this.currentSettings.excalidraw.safetyThresholds,
+          ...(settings.excalidraw?.safetyThresholds || {}),
+        },
+        snapshotRing: {
+          ...this.currentSettings.excalidraw.snapshotRing,
+          ...(settings.excalidraw?.snapshotRing || {}),
+        },
       },
     };
     try {
