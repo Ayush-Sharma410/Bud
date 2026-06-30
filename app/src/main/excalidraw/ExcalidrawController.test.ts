@@ -1,5 +1,5 @@
 /**
- * Manual unit tests for ExcalidrawController S2 session toggle logic.
+ * Manual unit tests for ExcalidrawController S2/S3 behavior.
  *
  * Run with: npx ts-node app/src/main/excalidraw/ExcalidrawController.test.ts
  */
@@ -55,6 +55,21 @@ async function test(name: string, fn: () => Promise<void> | void) {
     console.error(`❌ ${name}:`, err?.message || err);
     process.exitCode = 1;
   }
+}
+
+function makeScene(): import('./excalidrawTypes').SceneSummary {
+  return {
+    sceneVersion: 1,
+    elementCount: 3,
+    canvasSize: { width: 1000, height: 800 },
+    selection: [],
+    deletedCount: 0,
+    elements: [
+      { id: 'a', type: 'rectangle', x: 0, y: 0, width: 100, height: 100 },
+      { id: 'b', type: 'text', x: 10, y: 10, width: 80, height: 20, text: 'hi' },
+      { id: 'c', type: 'ellipse', x: 200, y: 200, width: 50, height: 50 },
+    ],
+  };
 }
 
 (async () => {
@@ -135,5 +150,124 @@ async function test(name: string, fn: () => Promise<void> | void) {
     if (!controller.getSessionState().isActive) throw new Error('session should be active');
   });
 
-  console.log('\n🎉 ExcalidrawController S2 tests passed');
+  // ── S3 applyOperation tests ────────────────────────────────────────────────
+
+  await test('applyOperation create sends canvas:apply-scene and resolves', async () => {
+    const wm = new ExcalidrawWindowManager();
+    let opened = false;
+    let applyRequest: any = null;
+    wm.openOrFocus = async () => {
+      opened = true;
+      return wm.getWindow() as any;
+    };
+    (wm as any).sendToCanvas = (channel: string, data: any) => {
+      if (channel === 'canvas:apply-scene') applyRequest = data;
+    };
+
+    const controller = new ExcalidrawController({ windowManager: wm, timeoutMs: 500 });
+    controller.onSceneChange(makeScene());
+
+    const pending = controller.applyOperation({
+      kind: 'create',
+      elementType: 'rectangle',
+      id: 'r-new',
+      x: 10,
+      y: 20,
+      width: 100,
+      height: 80,
+    });
+
+    // Wait for the async openOrFocus + sendToCanvas to run.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    if (!opened) throw new Error('canvas was not opened before apply');
+    if (!applyRequest) throw new Error('canvas:apply-scene was not sent');
+    if (applyRequest.operations[0].kind !== 'create') throw new Error('expected create operation');
+
+    controller.handleApplyResponse({
+      requestId: applyRequest.requestId,
+      result: { status: 'applied', sceneVersion: 2, affectedIds: ['r-new'], affectedCount: 1 },
+    });
+
+    const result = await pending;
+    if (result.status !== 'applied') throw new Error(`expected applied, got ${result.status}`);
+    if (result.affectedCount !== 1) throw new Error(`expected affectedCount 1, got ${result.affectedCount}`);
+  });
+
+  await test('applyOperation delete is blocked without sending IPC', async () => {
+    const wm = new ExcalidrawWindowManager();
+    let applyRequest: any = null;
+    wm.openOrFocus = async () => wm.getWindow() as any;
+    (wm as any).sendToCanvas = (channel: string, data: any) => {
+      if (channel === 'canvas:apply-scene') applyRequest = data;
+    };
+
+    const controller = new ExcalidrawController({ windowManager: wm });
+    controller.onSceneChange(makeScene());
+
+    const result = await controller.applyOperation({ kind: 'delete', ids: ['a'] });
+    if (result.status !== 'requires_confirmation') {
+      throw new Error(`expected requires_confirmation, got ${result.status}`);
+    }
+    if (applyRequest) throw new Error('canvas:apply-scene should not be sent for delete');
+  });
+
+  await test('applyOperation update missing id returns not_found without IPC', async () => {
+    const wm = new ExcalidrawWindowManager();
+    let applyRequest: any = null;
+    wm.openOrFocus = async () => wm.getWindow() as any;
+    (wm as any).sendToCanvas = (channel: string, data: any) => {
+      if (channel === 'canvas:apply-scene') applyRequest = data;
+    };
+
+    const controller = new ExcalidrawController({ windowManager: wm });
+    controller.onSceneChange(makeScene());
+
+    const result = await controller.applyOperation({
+      kind: 'update',
+      ids: ['missing'],
+      changes: { strokeColor: '#ff0000' },
+    });
+    if (result.status !== 'not_found') throw new Error(`expected not_found, got ${result.status}`);
+    if (applyRequest) throw new Error('canvas:apply-scene should not be sent for not_found');
+  });
+
+  await test('applyOperation importScene returns unsupported without IPC', async () => {
+    const wm = new ExcalidrawWindowManager();
+    let applyRequest: any = null;
+    wm.openOrFocus = async () => wm.getWindow() as any;
+    (wm as any).sendToCanvas = (channel: string, data: any) => {
+      if (channel === 'canvas:apply-scene') applyRequest = data;
+    };
+
+    const controller = new ExcalidrawController({ windowManager: wm });
+    controller.onSceneChange(makeScene());
+
+    const result = await controller.applyOperation({
+      kind: 'importScene',
+      source: { type: 'file', path: '/tmp/foo.excalidraw' },
+    });
+    if (result.status !== 'unsupported') throw new Error(`expected unsupported, got ${result.status}`);
+    if (applyRequest) throw new Error('canvas:apply-scene should not be sent for importScene');
+  });
+
+  await test('applyOperation clearCanvas returns requires_confirmation without IPC', async () => {
+    const wm = new ExcalidrawWindowManager();
+    let applyRequest: any = null;
+    wm.openOrFocus = async () => wm.getWindow() as any;
+    (wm as any).sendToCanvas = (channel: string, data: any) => {
+      if (channel === 'canvas:apply-scene') applyRequest = data;
+    };
+
+    const controller = new ExcalidrawController({ windowManager: wm });
+    controller.onSceneChange(makeScene());
+
+    const result = await controller.applyOperation({ kind: 'clearCanvas' });
+    if (result.status !== 'requires_confirmation') {
+      throw new Error(`expected requires_confirmation, got ${result.status}`);
+    }
+    if (applyRequest) throw new Error('canvas:apply-scene should not be sent for clearCanvas');
+  });
+
+  console.log('\n🎉 ExcalidrawController S2/S3 tests passed');
 })();

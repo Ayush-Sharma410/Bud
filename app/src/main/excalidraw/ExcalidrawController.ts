@@ -1,13 +1,20 @@
 import { randomUUID } from 'crypto';
 import { ExcalidrawWindowManager } from './ExcalidrawWindowManager';
+import { classifyOperation } from './safetyGate';
 import type {
+  ApplyResult,
+  CanvasApplyRequest,
+  CanvasApplyResponse,
   CanvasHUDPayload,
   CanvasHUDState,
   CanvasSceneRequest,
   CanvasSceneResponse,
+  ExcalidrawOperation,
   ExcalidrawSessionState,
   SceneSummary,
 } from './excalidrawTypes';
+
+import type { AppSettings } from '../settings';
 
 export interface ExcalidrawControllerOptions {
   windowManager: ExcalidrawWindowManager;
@@ -15,11 +22,19 @@ export interface ExcalidrawControllerOptions {
   getMuted?: () => boolean;
   /** Callback that toggles realtime mute. Should return the new muted state. */
   toggleMute?: () => boolean;
+  /** Callback that returns the current app settings. Used for safety thresholds. */
+  getSettings?: () => AppSettings;
   timeoutMs?: number;
 }
 
 interface PendingScene {
   resolve: (scene: SceneSummary) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingApply {
+  resolve: (result: ApplyResult) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -38,15 +53,23 @@ interface PendingScene {
  * - Keep the canvas window open when the session ends.
  * - Publish a minimal HUD state to the renderer.
  *
- * S3+ responsibilities (apply, proposals, undo, autosave) are intentionally
+ * S3 responsibilities:
+ * - Apply small, safe Excalidraw mutations immediately through `applyOperation`.
+ * - Classify operations with the deterministic safety gate and return structured
+ *   results (applied / requires_confirmation / unsupported / not_found / error).
+ * - Send controller-approved patches to the renderer via `canvas:apply-scene`.
+ *
+ * S4+ responsibilities (proposals, undo, autosave) are intentionally
  * not implemented here yet.
  */
 export class ExcalidrawController {
   private windowManager: ExcalidrawWindowManager;
   private getMuted?: () => boolean;
   private toggleMute?: () => boolean;
+  private getSettings?: () => AppSettings;
   private timeoutMs: number;
   private pendingScenes = new Map<string, PendingScene>();
+  private pendingApplies = new Map<string, PendingApply>();
   private latestScene: SceneSummary | null = null;
 
   // S2 session state
@@ -59,7 +82,13 @@ export class ExcalidrawController {
     this.windowManager = options.windowManager;
     this.getMuted = options.getMuted;
     this.toggleMute = options.toggleMute;
+    this.getSettings = options.getSettings;
     this.timeoutMs = options.timeoutMs ?? 5000;
+  }
+
+  /** Inject or replace the settings provider after app startup. */
+  setSettingsProvider(getSettings: () => AppSettings): void {
+    this.getSettings = getSettings;
   }
 
   /** Open the canvas window, or bring it to the foreground if it already exists. */
@@ -115,6 +144,70 @@ export class ExcalidrawController {
   /** Return the most recently observed scene summary, if any. */
   getLatestScene(): SceneSummary | null {
     return this.latestScene;
+  }
+
+  /**
+   * Apply a high-level, controller-approved Excalidraw operation.
+   *
+   * 1. Classifies the operation through the deterministic safety gate.
+   * 2. For immediate-safe ops, sends a controller-generated patch to the
+   *    renderer via `canvas:apply-scene` and waits for `canvas:apply-response`.
+   * 3. For destructive/large/ambiguous/unsupported ops, returns the
+   *    corresponding structured status without mutating the scene.
+   */
+  async applyOperation(op: ExcalidrawOperation): Promise<ApplyResult> {
+    const scene = this.latestScene ?? (await this.readScene());
+    const settings = this.getSettings?.().excalidraw ?? {
+      toggleHotkey: 'CommandOrControl+Shift+Space',
+      saveDirectory: '',
+      autosaveIntervalMs: 5000,
+      theme: 'auto',
+      safetyThresholds: { maxElementsPerImmediateApply: 5, maxElementsPerDelete: 3 },
+      snapshotRing: { maxOperations: 50, maxAgeMs: 1_800_000 },
+    };
+    const classification = classifyOperation(op, { scene, settings });
+
+    if (classification.decision === 'requires_confirmation') {
+      return { status: 'requires_confirmation', reason: classification.reason ?? 'Operation requires confirmation.' };
+    }
+    if (classification.decision === 'unsupported') {
+      return { status: 'unsupported', reason: classification.reason ?? 'Operation is not supported in S3.' };
+    }
+    if (classification.decision === 'not_found') {
+      return { status: 'not_found', ids: classification.notFoundIds ?? [], reason: classification.reason ?? 'Target elements not found.' };
+    }
+    if (classification.decision === 'error') {
+      return { status: 'error', reason: classification.reason ?? 'Safety gate error.' };
+    }
+
+    // Immediate path: open the canvas, send patch, wait for renderer response.
+    await this.windowManager.openOrFocus();
+
+    return new Promise<ApplyResult>((resolve, reject) => {
+      const requestId = randomUUID();
+      const timer = setTimeout(() => {
+        this.pendingApplies.delete(requestId);
+        reject(new Error(`applyOperation timed out after ${this.timeoutMs}ms`));
+      }, this.timeoutMs);
+
+      this.pendingApplies.set(requestId, { resolve, reject, timer });
+
+      const request: CanvasApplyRequest = { requestId, operations: [op] };
+      this.windowManager.sendToCanvas('canvas:apply-scene', request);
+    });
+  }
+
+  /** Handle a renderer response to a prior `applyOperation(...)` request. */
+  handleApplyResponse(response: CanvasApplyResponse): void {
+    const pending = this.pendingApplies.get(response.requestId);
+    if (!pending) {
+      console.warn(`⚠️ ExcalidrawController: unmatched apply response ${response.requestId}`);
+      return;
+    }
+
+    clearTimeout(pending.timer);
+    this.pendingApplies.delete(response.requestId);
+    pending.resolve(response.result);
   }
 
   // --- S2: canvas-scoped voice session toggle ---

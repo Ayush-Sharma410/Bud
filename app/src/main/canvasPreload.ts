@@ -6,6 +6,8 @@
  */
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  CanvasApplyRequest,
+  CanvasApplyResponse,
   CanvasHUDPayload,
   CanvasSceneRequest,
   CanvasSceneResponse,
@@ -30,10 +32,15 @@ contextBridge.exposeInMainWorld('budCanvasAPI', {
     ipcRenderer.send('canvas:scene-change', scene);
   },
 
-  // Main -> renderer: HUD status updates
-  onHUDState: (callback: (payload: CanvasHUDPayload) => void) => {
-    ipcRenderer.on('canvas:hud', (_event, payload: CanvasHUDPayload) => {
-      callback(payload);
+  // Main -> renderer: apply a controller-approved operation batch
+  onApplyScene: (callback: (request: CanvasApplyRequest) => void) => {
+    ipcRenderer.on('canvas:apply-scene', (_event, request: CanvasApplyRequest) => {
+      callback(request);
     });
+  },
+
+  // Renderer -> main response: answer for a specific apply request
+  sendApplyResponse: (requestId: string, result: CanvasApplyResponse['result']) => {
+    ipcRenderer.send('canvas:apply-response', { requestId, result } as CanvasApplyResponse);
   },
 });

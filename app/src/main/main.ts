@@ -84,7 +84,7 @@ import { AnnotationController } from './annotations/AnnotationController';
 import { createDrawAnnotationTools } from './annotations/createDrawAnnotationTool';
 import { ExcalidrawWindowManager } from './excalidraw/ExcalidrawWindowManager';
 import { ExcalidrawController } from './excalidraw/ExcalidrawController';
-import type { CanvasSceneResponse, SceneSummary } from './excalidraw/excalidrawTypes';
+import type { CanvasApplyResponse, CanvasSceneResponse, SceneSummary } from './excalidraw/excalidrawTypes';
 
 // Prevent multiple instances
 const gotTheLock = app.requestSingleInstanceLock();
@@ -169,7 +169,7 @@ app.whenReady().then(async () => {
     getOverlayWindow: () => overlayManager.getWindow(),
   });
 
-  // 2.6 Create Excalidraw canvas controller (S1: window manager + readScene IPC only)
+  // 2.6 Create Excalidraw canvas controller (S1 window manager + S2 session toggle + S3 apply operation)
   excalidrawWindowManager = new ExcalidrawWindowManager();
   excalidrawController = new ExcalidrawController({
     windowManager: excalidrawWindowManager,
@@ -185,7 +185,11 @@ app.whenReady().then(async () => {
     excalidrawController.onSceneChange(scene);
   });
 
-  console.log('🎨 Excalidraw canvas controller initialized (S1)');
+  ipcMain.on('canvas:apply-response', (_event, response: CanvasApplyResponse) => {
+    excalidrawController.handleApplyResponse(response);
+  });
+
+  console.log('🎨 Excalidraw canvas controller initialized (S1/S2/S3)');
 
   // 3. Create audio playback manager (uses overlay window for audio)
   audioPlayback = new AudioPlaybackManager();
@@ -202,6 +206,7 @@ app.whenReady().then(async () => {
 
   // 5. Initialize Settings & Create AI providers
   settingsManager = new SettingsManager();
+  excalidrawController.setSettingsProvider(() => settingsManager.getSettings());
   const currentSettings = settingsManager.getSettings();
   providers = createProviders(currentSettings);
 
