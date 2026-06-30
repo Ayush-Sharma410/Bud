@@ -18,6 +18,12 @@
   let nextStartTime = 0;
   let activeSources = [];
   let pendingChunks = new Int16Array(0);
+  // When playback is stopped (interruption), new audio chunks for the
+  // superseded context that were already in flight must be dropped. We track
+  // the last stopped context id and ignore its chunks until a fresh context
+  // begins, so Bud doesn't keep talking after the user interrupted.
+  let stoppedContextId = null;
+  let activeContextId = null;
 
   function ab2b64(buffer) {
     const bytes = new Uint8Array(buffer);
@@ -139,6 +145,12 @@
     audioQueue = [];
     nextStartTime = 0;
     pendingChunks = new Int16Array(0);
+    // Mark the context that was just interrupted so late in-flight chunks for
+    // it are dropped in playAudioChunk() until a new context shows up.
+    if (activeContextId) {
+      stoppedContextId = activeContextId;
+    }
+    activeContextId = null;
   }
 
   function base64ToInt16(base64) {
@@ -150,9 +162,31 @@
     return new Int16Array(bytes.buffer);
   }
 
-  function playAudioChunk(base64Audio) {
+  function playAudioChunk(base64Audio, contextId) {
+    // Drop audio for a context that was just interrupted (stopPlayback ran).
+    // The main process also drops these, but chunks already forwarded before
+    // the cancel took effect still arrive here — they must not resume speaking.
+    if (contextId && stoppedContextId && contextId === stoppedContextId) {
+      return;
+    }
+    if (contextId && contextId !== activeContextId) {
+      // A fresh context started — clear any stale stopped marker.
+      stoppedContextId = null;
+      activeContextId = contextId;
+      // Reset the sample accumulator so leftovers from a previous context
+      // don't bleed into the new utterance.
+      pendingChunks = new Int16Array(0);
+      audioQueue = [];
+      nextStartTime = 0;
+    }
+
     if (!audioCtx) {
       audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+    }
+    // AudioContexts can start suspended (esp. when created without a user
+    // gesture). Make sure it's running before scheduling audio.
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(() => {});
     }
 
     const samples = base64ToInt16(base64Audio);
@@ -187,7 +221,7 @@
   }
 
   function handleAudioEvent(event) {
-    playAudioChunk(event.base64Audio);
+    playAudioChunk(event.base64Audio, event.contextId);
   }
 
   if (window.budAPI) {

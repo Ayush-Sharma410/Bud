@@ -335,9 +335,20 @@ function applyOperationsToScene(
   for (const op of operations) {
     switch (op.kind) {
       case 'create': {
-        const element = createElementFromOperation(op);
+        const element = createElementFromOperation(op, elementsById);
         elementsById.set(element.id, element);
         affectedIds.push(element.id);
+
+        // Register arrow/line bindings on the bound elements so Excalidraw
+        // knows the element has a connected arrow that should follow it.
+        if ((op.elementType === 'arrow' || op.elementType === 'line') && elementsById) {
+          if (op.startElementId) {
+            addBoundElement(elementsById, op.startElementId, element.id);
+          }
+          if (op.endElementId) {
+            addBoundElement(elementsById, op.endElementId, element.id);
+          }
+        }
         break;
       }
       case 'update': {
@@ -415,7 +426,131 @@ function applyOperationsToScene(
   };
 }
 
-function createElementFromOperation(op: CreateElementOperation): ExcalidrawElement {
+type ArrowBinding = { elementId: string; focus: number; gap: number };
+
+/** Small visual gap (px) between an arrow endpoint and the box edge it binds to. */
+const BINDING_EDGE_GAP = 6;
+
+/**
+ * Compute the point where a ray from the center of `box` toward `(targetX, targetY)`
+ * exits the box's rectangular boundary. This makes arrows touch the box edge
+ * instead of passing through the box interior to its center.
+ */
+function edgePoint(
+  box: { x: number; y: number; width: number; height: number },
+  targetX: number,
+  targetY: number,
+): { x: number; y: number } {
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  const dx = targetX - cx;
+  const dy = targetY - cy;
+  if (dx === 0 && dy === 0) return { x: cx, y: cy };
+
+  const hw = box.width / 2;
+  const hh = box.height / 2;
+  // Distance (in units of the direction vector) to each vertical / horizontal slab.
+  const scaleX = dx !== 0 ? hw / Math.abs(dx) : Infinity;
+  const scaleY = dy !== 0 ? hh / Math.abs(dy) : Infinity;
+  const scale = Math.min(scaleX, scaleY);
+
+  return { x: cx + dx * scale, y: cy + dy * scale };
+}
+
+/**
+ * Resolve start/end points and bindings for an arrow or line operation.
+ *
+ * When `startElementId` / `endElementId` are provided and the referenced
+ * elements exist in `elementsById`, the arrow endpoints are computed at the
+ * edge of each bound box (where the center-to-center line exits the rectangle)
+ * so the arrow touches the box boundary instead of overlapping the box
+ * interior. Excalidraw bindings are also created so the arrow follows the
+ * boxes when they are moved in the canvas. When bindings are not provided or
+ * the referenced element is missing, falls back to the op's x/y/width/height.
+ */
+function resolveLinearBindings(
+  op: CreateElementOperation,
+  elementsById?: Map<string, ExcalidrawElement>,
+): {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  startBinding: ArrowBinding | null;
+  endBinding: ArrowBinding | null;
+} {
+  let startX = op.x;
+  let startY = op.y;
+  let endX = op.x + op.width;
+  let endY = op.y + op.height;
+  let startBinding: ArrowBinding | null = null;
+  let endBinding: ArrowBinding | null = null;
+
+  const startEl = op.startElementId && elementsById ? elementsById.get(op.startElementId) : null;
+  const endEl = op.endElementId && elementsById ? elementsById.get(op.endElementId) : null;
+
+  if (startEl) {
+    startBinding = { elementId: op.startElementId!, focus: 0, gap: BINDING_EDGE_GAP };
+  }
+  if (endEl) {
+    endBinding = { elementId: op.endElementId!, focus: 0, gap: BINDING_EDGE_GAP };
+  }
+
+  if (startEl && endEl) {
+    // Both endpoints bound: each edge point faces the other box's center.
+    const startCx = startEl.x + startEl.width / 2;
+    const startCy = startEl.y + startEl.height / 2;
+    const endCx = endEl.x + endEl.width / 2;
+    const endCy = endEl.y + endEl.height / 2;
+    const s = edgePoint(startEl, endCx, endCy);
+    const e = edgePoint(endEl, startCx, startCy);
+    startX = s.x;
+    startY = s.y;
+    endX = e.x;
+    endY = e.y;
+  } else if (startEl) {
+    // Only start bound: end comes from the op's x/y/width/height.
+    const targetX = op.x + op.width;
+    const targetY = op.y + op.height;
+    const s = edgePoint(startEl, targetX, targetY);
+    startX = s.x;
+    startY = s.y;
+  } else if (endEl) {
+    // Only end bound: start comes from the op's x/y.
+    const targetX = op.x;
+    const targetY = op.y;
+    const e = edgePoint(endEl, targetX, targetY);
+    endX = e.x;
+    endY = e.y;
+  }
+
+  return { startX, startY, endX, endY, startBinding, endBinding };
+}
+
+/**
+ * Register a bound arrow/line id on the target element's `boundElements` array
+ * so Excalidraw knows the element has a connected arrow. No-ops if the target
+ * element is missing or the binding is already registered.
+ */
+function addBoundElement(
+  elementsById: Map<string, ExcalidrawElement>,
+  elementId: string,
+  boundId: string,
+): void {
+  const el = elementsById.get(elementId);
+  if (!el) return;
+  const existing = el.boundElements ?? [];
+  if (existing.some((b) => b.id === boundId)) return;
+  elementsById.set(elementId, {
+    ...el,
+    boundElements: [...existing, { id: boundId, type: 'arrow' as const }],
+  });
+}
+
+function createElementFromOperation(
+  op: CreateElementOperation,
+  elementsById?: Map<string, ExcalidrawElement>,
+): ExcalidrawElement {
   const id = op.id ?? generateId();
   const base = {
     id,
@@ -469,35 +604,49 @@ function createElementFromOperation(op: CreateElementOperation): ExcalidrawEleme
       return { ...base, type: op.elementType } as ExcalidrawElement;
     }
     case 'arrow': {
+      const { startX, startY, endX, endY, startBinding, endBinding } = resolveLinearBindings(op, elementsById);
+      const dx = endX - startX;
+      const dy = endY - startY;
       const points: readonly LocalPoint[] = [
         [0, 0],
-        [op.width, op.height],
+        [dx, dy],
       ];
       const arrow: ExcalidrawArrowElement = {
         ...base,
+        x: startX,
+        y: startY,
+        width: Math.abs(dx),
+        height: Math.abs(dy),
         type: 'arrow',
         elbowed: false,
         points,
         lastCommittedPoint: null,
-        startBinding: null,
-        endBinding: null,
+        startBinding,
+        endBinding,
         startArrowhead: null,
         endArrowhead: 'arrow',
       } as ExcalidrawArrowElement;
       return arrow as ExcalidrawElement;
     }
     case 'line': {
+      const { startX, startY, endX, endY, startBinding, endBinding } = resolveLinearBindings(op, elementsById);
+      const dx = endX - startX;
+      const dy = endY - startY;
       const points: readonly LocalPoint[] = [
         [0, 0],
-        [op.width, op.height],
+        [dx, dy],
       ];
       const linear: ExcalidrawLinearElement = {
         ...base,
+        x: startX,
+        y: startY,
+        width: Math.abs(dx),
+        height: Math.abs(dy),
         type: 'line',
         points,
         lastCommittedPoint: null,
-        startBinding: null,
-        endBinding: null,
+        startBinding,
+        endBinding,
         startArrowhead: null,
         endArrowhead: null,
       } as ExcalidrawLinearElement;
@@ -621,11 +770,13 @@ function buildGhostPayload(
       const tint = optionTint(i);
       const offset = i * 4;
       const optionGhostIds: string[] = [];
+      const optionById = new Map(byId);
 
       for (const op of option.operations) {
         switch (op.kind) {
           case 'create': {
-            const created = createElementFromOperation(op as CreateElementOperation);
+            const created = createElementFromOperation(op as CreateElementOperation, optionById);
+            optionById.set(created.id, created);
             const ghost = toGhostElement(created, proposalId, undefined, option.optionId) as Record<string, any>;
             ghost.strokeColor = tint;
             ghost.x += offset;
@@ -697,7 +848,8 @@ function buildGhostPayload(
   for (const op of request.operations) {
     switch (op.kind) {
       case 'create': {
-        const created = createElementFromOperation(op as CreateElementOperation);
+        const created = createElementFromOperation(op as CreateElementOperation, byId);
+        byId.set(created.id, created);
         ghosts.push(toGhostElement(created, proposalId));
         break;
       }

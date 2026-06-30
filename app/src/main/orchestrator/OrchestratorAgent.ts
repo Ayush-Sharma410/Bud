@@ -110,58 +110,89 @@ export class OrchestratorAgent {
 
     const ttsParser = new TTSMarkerParser();
     const toolCallMap = new Map<string, string>();
-    let complexHasSpoken = false;
+    const signal = options.signal;
 
     try {
       const modelOptions: CreateLanguageModelOptions = { provider: 'openai' };
       if (this.baseURL) modelOptions.baseURL = this.baseURL;
 
-      // --- Preamble call (mini, no tools, single-shot) ---
-      // Mini decides: answer directly (REPLY), ack and defer (ACK), or defer silently (PASS).
-      const preambleMessages = this.history.slice(-2);
-      const preambleResult = streamText({
-        model: createLanguageModel(this.preambleModel, { provider: 'openai' }),
-        system: this.preambleSystem,
-        messages: preambleMessages,
-        tools: {},
-        abortSignal: options.signal,
+      // Decision from the preamble stream, resolved once we've seen the marker.
+      type PreambleDecision =
+        | { kind: 'reply'; text: string }
+        | { kind: 'ack'; text: string }
+        | { kind: 'pass' }
+        | { kind: 'none' };
+      const preambleDecision = new Promise<PreambleDecision>(async (resolve) => {
+        const preambleMessages = this.history.slice(-2);
+        const preambleResult = streamText({
+          model: createLanguageModel(this.preambleModel, { provider: 'openai' }),
+          system: this.preambleSystem,
+          messages: preambleMessages,
+          tools: {},
+          abortSignal: signal,
+        });
+
+        let preambleText = '';
+        let decided = false;
+        try {
+          for await (const chunk of preambleResult.textStream) {
+            preambleText += chunk;
+
+            // Try to resolve the decision as soon as the closing marker lands.
+            if (!decided) {
+              const replyMatch = preambleText.match(/<REPLY>([\s\S]*?)<\/REPLY>/i);
+              if (replyMatch) {
+                decided = true;
+                resolve({ kind: 'reply', text: replyMatch[1].trim() });
+                continue; // keep draining the rest of the stream
+              }
+              const ackMatch = preambleText.match(/<ACK>([\s\S]*?)<\/ACK>/i);
+              if (ackMatch) {
+                decided = true;
+                resolve({ kind: 'ack', text: ackMatch[1].trim() });
+                continue;
+              }
+              const passMatch = preambleText.match(/<PASS>\s*$/i);
+              if (passMatch) {
+                decided = true;
+                resolve({ kind: 'pass' });
+                continue;
+              }
+            }
+          }
+          if (!decided) {
+            resolve({ kind: 'none' });
+          }
+        } catch (err) {
+          // If the preamble fails, fall through to the complex model.
+          console.error('⚠️ Preamble stream failed, falling back:', (err as Error).message);
+          resolve({ kind: 'none' });
+        }
       });
 
-      let preambleText = '';
-      for await (const chunk of preambleResult.textStream) {
-        preambleText += chunk;
-      }
-      const trimmed = preambleText.trim();
+      const decision = await preambleDecision;
 
-      const replyMatch = trimmed.match(/<REPLY>([\s\S]*?)<\/REPLY>/i);
-      const ackMatch = trimmed.match(/<ACK>([\s\S]*?)<\/ACK>/i);
-
-      // --- REPLY: mini handles it directly, skip complex model ---
-      if (replyMatch) {
-        const replyText = replyMatch[1].trim();
-        if (replyText) {
-          this.eventBus.emit('text', replyText);
-          this.eventBus.emit('tts', replyText);
-        }
-        this.history.push({ role: 'assistant', content: replyText });
-        this.trimHistory();
-        this.eventBus.emit('done', { finalText: replyText });
-        return { finalText: replyText };
-      }
-
-      // --- ACK: emit contextual ack, then complex model runs ---
-      if (ackMatch) {
-        const ack = ackMatch[1].trim().slice(0, 60);
-        if (ack) {
-          this.eventBus.emit('tts', ack);
-        }
-      }
-
-      // Check if we were aborted during the preamble call.
-      if (options.signal?.aborted) {
-        console.log('🗣️ OrchestratorAgent aborted during preamble — skipping complex call');
+      // Check abort between phases.
+      if (signal?.aborted) {
+        console.log('🗣️ OrchestratorAgent aborted during preamble');
         this.eventBus.emit('done', { finalText: '' });
         return { finalText: '' };
+      }
+
+      // --- REPLY: mini owns the answer, skip the complex model entirely ---
+      if (decision.kind === 'reply' && decision.text) {
+        this.eventBus.emit('text', decision.text);
+        this.eventBus.emit('tts', decision.text);
+        this.history.push({ role: 'assistant', content: decision.text });
+        this.trimHistory();
+        this.eventBus.emit('done', { finalText: decision.text });
+        return { finalText: decision.text };
+      }
+
+      // --- ACK: speak the ack while the complex model works in parallel ---
+      if (decision.kind === 'ack' && decision.text) {
+        const ack = decision.text.slice(0, 60);
+        if (ack) this.eventBus.emit('tts', ack);
       }
 
       // --- Complex call (gpt-5.1, tools, multi-step loop) ---
@@ -172,7 +203,7 @@ export class OrchestratorAgent {
         tools: this.tools,
         toolChoice: 'auto',
         stopWhen: stepCountIs(this.maxSteps),
-        abortSignal: options.signal,
+        abortSignal: signal,
         onStepFinish: async ({ toolCalls, toolResults, text }) => {
           for (const tc of toolCalls as any[]) {
             this.eventBus.emit('toolCall', {
@@ -195,6 +226,7 @@ export class OrchestratorAgent {
         },
       });
 
+      let complexHasSpoken = false;
       for await (const chunk of result.textStream) {
         const parsedChunks = ttsParser.push(chunk);
         for (const pc of parsedChunks) {
@@ -214,7 +246,9 @@ export class OrchestratorAgent {
         this.eventBus.emit('text', leftover);
       }
 
-      if (!complexHasSpoken && finalText) {
+      // Complex call may have written a final answer outside <TTS> tags.
+      // Don't double-speak if an ACK was already emitted.
+      if (!complexHasSpoken && decision.kind !== 'ack' && finalText) {
         this.eventBus.emit('tts', finalText);
       }
 

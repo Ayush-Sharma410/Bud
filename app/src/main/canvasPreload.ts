@@ -6,6 +6,7 @@
  */
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
+  ApplyResult,
   CanvasApplyRequest,
   CanvasApplyResponse,
   CanvasClearGhostsRequest,
@@ -48,6 +49,11 @@ contextBridge.exposeInMainWorld('budCanvasAPI', {
     ipcRenderer.on('canvas:apply-scene', (_event, request: CanvasApplyRequest) => {
       callback(request);
     });
+  },
+
+  // Renderer -> main: response to a specific `canvas:apply-scene`
+  sendApplyResponse: (requestId: string, result: ApplyResult) => {
+    ipcRenderer.send('canvas:apply-response', { requestId, result } as CanvasApplyResponse);
   },
 
   // Main -> renderer: render a proposal's ghost elements

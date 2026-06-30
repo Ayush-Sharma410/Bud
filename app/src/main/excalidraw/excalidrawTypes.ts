@@ -109,6 +109,10 @@ export interface CreateElementOperation {
   opacity?: number;
   angle?: number;
   fillStyle?: 'hachure' | 'cross-hatch' | 'solid' | 'zigzag';
+  /** For arrows/lines: bind the start endpoint to this element id. The element must exist in the scene or be created earlier in the same batch. When set, x/y are computed from the bound element's center. */
+  startElementId?: string;
+  /** For arrows/lines: bind the end endpoint to this element id. When set, width/height are computed from the bound element's center. */
+  endElementId?: string;
 }
 
 /** Allowed fields for an immediate update. Keeps callers from passing arbitrary element JSON. */

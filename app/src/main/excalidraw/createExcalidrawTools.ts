@@ -40,7 +40,7 @@ const operationSchema = jsonSchema({
         y: { type: 'number' },
         width: { type: 'number' },
         height: { type: 'number' },
-        id: { type: 'string', description: 'Optional stable id for the new element.' },
+        id: { type: 'string', description: 'Optional stable id for the new element. Set this when you want other elements (e.g. arrows) to bind to this element.' },
         text: { type: 'string' },
         strokeColor: colorSchema,
         backgroundColor: colorSchema,
@@ -49,6 +49,8 @@ const operationSchema = jsonSchema({
         opacity: { type: 'number', minimum: 0, maximum: 100 },
         angle: { type: 'number' },
         fillStyle: fillStyleSchema,
+        startElementId: { type: 'string', description: 'For arrows/lines only: bind the start endpoint to this element id. The element must exist in the scene or be created earlier in the same batch. When set, x/y are computed from the bound element center.' },
+        endElementId: { type: 'string', description: 'For arrows/lines only: bind the end endpoint to this element id. When set, width/height are computed from the bound element center.' },
       },
       required: ['kind', 'elementType', 'x', 'y', 'width', 'height'],
     },
@@ -205,6 +207,24 @@ export function createExcalidrawTools(controller: ExcalidrawController) {
     async (args: any) => controller.applyOperation(args.operation)
   );
 
+  const applyOperationsPair = createToolPair(
+    controller,
+    'excalidraw_applyOperations',
+    'Apply a batch of safe Excalidraw operations in a single call. Use this to draw an entire diagram, flowchart, or workflow at once — create all boxes, text labels, and arrows in one call. All operations must be immediate-safe (creates and small updates); if any operation is destructive (delete/clear) or geometry-affecting (align/distribute/group/layout), the entire batch is rejected with requires_confirmation — split those out. For arrows connecting boxes, set startElementId and endElementId to the box ids so arrows follow the boxes when moved. Give each box a stable id so arrows can reference it. Operations are processed in order, so create boxes before arrows that bind to them.',
+    jsonSchema({
+      type: 'object',
+      properties: {
+        operations: {
+          type: 'array',
+          items: operationSchema.jsonSchema,
+          description: 'Array of operations to apply in one batch. Processed in order. Create boxes with stable ids first, then arrows that reference those ids via startElementId/endElementId.',
+        },
+      },
+      required: ['operations'],
+    }),
+    async (args: any) => controller.applyOperations(args.operations)
+  );
+
   const proposeOperationPair = createToolPair(
     controller,
     'excalidraw_proposeOperation',
@@ -264,6 +284,7 @@ export function createExcalidrawTools(controller: ExcalidrawController) {
   const pairs = [
     readScenePair,
     applyOperationPair,
+    applyOperationsPair,
     proposeOperationPair,
     confirmProposalPair,
     cancelProposalPair,

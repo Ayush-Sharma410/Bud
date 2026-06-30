@@ -44,6 +44,10 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
   private reconnectFallbackTriggered = false;
   private orchestrator: OrchestratorAgent;
   private turnAbortController: AbortController | null = null;
+  // Context ids whose audio output has been cancelled by an interruption.
+  // In-flight chunks arriving for these after cancelContext() must be dropped
+  // so the renderer doesn't keep playing the interrupted response.
+  private cancelledContextIds = new Set<string>();
 
   constructor(options: CartesiaRealtimeVoiceManagerOptions) {
     super();
@@ -84,6 +88,9 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     bus.on('toolCall', ({ id, name, input }) => {
       this.pendingToolCalls++;
       console.log(`🔧 Tool call: ${name} (${id})`);
+      // While tools are running we are "thinking", not "speaking" — even if an
+      // ACK was just spoken. Keep the pill honest about what Bud is doing.
+      this.setVoiceState('processing');
       this.emitToUI('realtime-tool-call', { id, name, input });
       this.emit('tool.call', { name, input });
     });
@@ -96,6 +103,12 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
         success,
         result: stripped,
       });
+      // If all tools finished but the orchestrator is still composing its final
+      // answer, we are back to thinking. If it already spoke, the next tts event
+      // will flip us to responding.
+      if (this.pendingToolCalls === 0 && this.isResponseActive) {
+        this.setVoiceState('processing');
+      }
     });
 
     bus.on('toolRetry', ({ id, attempt, reason }) => {
@@ -105,7 +118,12 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
 
     bus.on('done', ({ finalText }) => {
       this.isResponseActive = false;
-      this.tts.flushContext(this.ttsContextId!);
+      // Only flush if we still own a live TTS context. After an interruption
+      // ttsContextId is null and the context was cancelled — flushing null
+      // would send an invalid request to Cartesia.
+      if (this.ttsContextId) {
+        this.tts.flushContext(this.ttsContextId);
+      }
       this.emitToUI('realtime-response-text', finalText);
       this.emitToUI('realtime-response-done', {});
     });
@@ -166,7 +184,13 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     });
 
     this.tts.on('audio.delta', (event: { contextId: string; base64Audio: string; done: boolean }) => {
-      // Audio playback is handled by the panel renderer; do not duplicate via emitToUI.
+      // Drop audio for contexts that were cancelled by an interruption.
+      // Cartesia may still deliver a few chunks that were already in flight
+      // before cancelContext() took effect — forwarding them would make the
+      // renderer resume playback after stopPlayback(), defeating interruption.
+      if (event.contextId && this.cancelledContextIds.has(event.contextId)) {
+        return;
+      }
       this.emitToRenderer('cartesia-tts-audio', {
         contextId: event.contextId,
         base64Audio: event.base64Audio,
@@ -174,7 +198,11 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
       });
     });
 
-    this.tts.on('audio.done', () => {
+    this.tts.on('audio.done', (event?: { contextId?: string }) => {
+      // Ignore audio.done for cancelled contexts for the same reason as above.
+      if (event?.contextId && this.cancelledContextIds.has(event.contextId)) {
+        return;
+      }
       if (!this.isResponseActive && this.pendingToolCalls === 0) {
         this.setVoiceState('idle');
         this.emitToUI('realtime-response-done', {});
@@ -198,6 +226,7 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
 
     this.isResponseActive = true;
     this.responseTextBuffer = '';
+    this.cancelledContextIds.clear();
     this.ttsContextId = this.tts.startContext();
     this.turnAbortController = new AbortController();
 
@@ -356,6 +385,9 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     }
 
     if (this.ttsContextId) {
+      // Remember this context so in-flight audio chunks that arrive after the
+      // cancel are dropped instead of being forwarded to the renderer.
+      this.cancelledContextIds.add(this.ttsContextId);
       this.tts.cancelContext(this.ttsContextId);
       this.ttsContextId = null;
     }

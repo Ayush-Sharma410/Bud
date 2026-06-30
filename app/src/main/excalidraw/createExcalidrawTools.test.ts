@@ -77,6 +77,7 @@ function makeScene(): SceneSummary {
 const REQUIRED_TOOLS = [
   'excalidraw_readScene',
   'excalidraw_applyOperation',
+  'excalidraw_applyOperations',
   'excalidraw_proposeOperation',
   'excalidraw_confirmProposal',
   'excalidraw_cancelProposal',
@@ -93,7 +94,7 @@ const REQUIRED_TOOLS = [
     return { controller, wm };
   }
 
-  await test('registers all six exact tool names on both Vercel and Realtime sides', () => {
+  await test('registers all seven exact tool names on both Vercel and Realtime sides', () => {
     const { controller } = makeController();
     const { vercelTools, realtimeExecutors } = createExcalidrawTools(controller);
 
@@ -160,6 +161,34 @@ const REQUIRED_TOOLS = [
     const rtResult = await rtExecutor.execute({ operation: op });
     if (rtResult !== applied) throw new Error('Realtime applyOperation result mismatch');
     if (JSON.stringify(receivedOp) !== JSON.stringify(op)) throw new Error('applyOperation received wrong operation');
+  });
+
+  await test('excalidraw_applyOperations routes to controller.applyOperations with a batch', async () => {
+    const { controller } = makeController();
+    const applied: ApplyResult = { status: 'applied', sceneVersion: 5, affectedIds: ['b1', 'b2', 'a1'], affectedCount: 3 };
+    let receivedOps: any = null;
+    controller.applyOperations = async (ops) => {
+      receivedOps = ops;
+      return applied;
+    };
+
+    const { vercelTools, realtimeExecutors } = createExcalidrawTools(controller);
+    const ops = [
+      { kind: 'create', elementType: 'rectangle', id: 'b1', x: 0, y: 0, width: 100, height: 60 },
+      { kind: 'create', elementType: 'rectangle', id: 'b2', x: 0, y: 120, width: 100, height: 60 },
+      { kind: 'create', elementType: 'arrow', x: 0, y: 0, width: 0, height: 0, startElementId: 'b1', endElementId: 'b2' },
+    ];
+
+    const vercelResult = await vercelTools.excalidraw_applyOperations.execute(
+      { operations: ops },
+      { toolCallId: 't-batch', messages: [] },
+    );
+    if (vercelResult !== applied) throw new Error('Vercel applyOperations result mismatch');
+
+    const rtExecutor = realtimeExecutors.find((e) => e.name === 'excalidraw_applyOperations')!;
+    const rtResult = await rtExecutor.execute({ operations: ops });
+    if (rtResult !== applied) throw new Error('Realtime applyOperations result mismatch');
+    if (JSON.stringify(receivedOps) !== JSON.stringify(ops)) throw new Error('applyOperations received wrong operations');
   });
 
   await test('excalidraw_proposeOperation routes to controller.proposeOperation', async () => {

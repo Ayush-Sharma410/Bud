@@ -282,6 +282,54 @@ export class ExcalidrawController {
   }
 
   /**
+   * Apply a batch of high-level Excalidraw operations in a single call.
+   *
+   * Classifies each operation through the safety gate. If all are
+   * immediate-safe, commits them in one batch (one undo snapshot for the
+   * whole batch). If any operation requires confirmation or is
+   * unsupported/not_found/error, returns that status without applying
+   * anything — the caller should split safe and unsafe operations.
+   */
+  async applyOperations(operations: ExcalidrawOperation[]): Promise<ApplyResult> {
+    if (!operations || operations.length === 0) {
+      return { status: 'error', reason: 'No operations provided.' };
+    }
+
+    const scene = this.latestScene ?? (await this.readScene());
+    const settings = this.getExcalidrawSettings();
+
+    const resolvedOps: ExcalidrawOperation[] = [];
+    for (const op of operations) {
+      const classification = classifyOperation(op, { scene, settings });
+
+      if (classification.decision === 'requires_confirmation') {
+        return {
+          status: 'requires_confirmation',
+          reason: classification.reason ??
+            'Batch contains operations that require confirmation. Use excalidraw_proposeOperation for destructive or geometry-affecting operations, or split the batch.',
+        };
+      }
+      if (classification.decision === 'unsupported') {
+        return { status: 'unsupported', reason: classification.reason ?? 'Operation is not supported.' };
+      }
+      if (classification.decision === 'not_found') {
+        return { status: 'not_found', ids: classification.notFoundIds ?? [], reason: classification.reason ?? 'Target elements not found.' };
+      }
+      if (classification.decision === 'error') {
+        return { status: 'error', reason: classification.reason ?? 'Safety gate error.' };
+      }
+
+      const resolvedOp = this.resolveOperationTargets(op, scene);
+      if (!resolvedOp) {
+        return { status: 'not_found', ids: [], reason: 'No target ids provided and no current selection to resolve targets.' };
+      }
+      resolvedOps.push(resolvedOp);
+    }
+
+    return this.commitOperations(resolvedOps);
+  }
+
+  /**
    * Controller-internal confirmed apply path.
    *
    * Bypasses the safety gate and is only used to commit operations that have
