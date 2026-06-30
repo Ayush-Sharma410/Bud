@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bud Excalidraw Voice Copilot — Phase 1</title>
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --panel: #121827;
+      --panel-2: #172033;
+      --panel-3: #0f1524;
+      --text: #eef4ff;
+      --muted: #9fb0c8;
+      --line: #2a3852;
+      --blue: #7aa2ff;
+      --violet: #a78bfa;
+      --green: #62d26f;
+      --amber: #f5b84b;
+      --red: #ff7474;
+      --cyan: #67e8f9;
+      --shadow: 0 20px 60px rgba(0,0,0,.35);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 20% 0%, rgba(122,162,255,.18), transparent 32rem),
+        radial-gradient(circle at 90% 10%, rgba(167,139,250,.14), transparent 30rem),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    a { color: var(--cyan); }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: .45rem;
+      padding: .12rem .36rem;
+      color: #dbeafe;
+      overflow-wrap: anywhere;
+    }
+
+    .page { max-width: 1180px; margin: 0 auto; padding: 32px 20px 64px; }
+
+    .hero {
+      padding: 42px;
+      border: 1px solid rgba(122,162,255,.28);
+      border-radius: 28px;
+      background: linear-gradient(135deg, rgba(18,24,39,.92), rgba(23,32,51,.78));
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+    .hero:after {
+      content: "";
+      position: absolute;
+      right: -90px;
+      top: -100px;
+      width: 260px;
+      height: 260px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(122,162,255,.28), transparent 65%);
+    }
+    .eyebrow { color: var(--cyan); text-transform: uppercase; letter-spacing: .16em; font-size: 12px; font-weight: 800; }
+    h1 { margin: 10px 0 12px; font-size: clamp(34px, 6vw, 64px); line-height: .98; letter-spacing: -.05em; }
+    .subtitle { max-width: 820px; color: var(--muted); font-size: clamp(17px, 2vw, 22px); }
+    .status-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.06);
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 650;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+    .green { background: var(--green); box-shadow: 0 0 18px rgba(98,210,111,.55); }
+    .amber { background: var(--amber); box-shadow: 0 0 18px rgba(245,184,75,.45); }
+    .blue { background: var(--blue); box-shadow: 0 0 18px rgba(122,162,255,.45); }
+
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      margin: 18px 0 28px;
+      padding: 10px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 18px;
+      background: rgba(11,15,23,.78);
+      backdrop-filter: blur(14px);
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    .nav a {
+      display: inline-block;
+      color: var(--muted);
+      text-decoration: none;
+      padding: 8px 11px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+    .nav a:hover { color: var(--text); background: rgba(255,255,255,.07); }
+
+    section {
+      margin-top: 26px;
+      padding: 28px;
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: 24px;
+      background: rgba(18,24,39,.86);
+      box-shadow: 0 10px 40px rgba(0,0,0,.22);
+      overflow: hidden;
+    }
+    section h2 { margin: 0 0 14px; font-size: 26px; letter-spacing: -.025em; }
+    section > p { color: var(--muted); margin: 0 0 18px; max-width: 900px; }
+
+    .grid { display: grid; gap: 14px; }
+    .grid.cols-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .grid.cols-3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+    .grid.cols-4 { grid-template-columns: repeat(4, minmax(0,1fr)); }
+    @media (max-width: 920px) { .grid.cols-3, .grid.cols-4 { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+    @media (max-width: 640px) {
+      .page { padding: 18px 12px 44px; }
+      .hero, section { padding: 22px; border-radius: 20px; }
+      .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: 1fr; }
+    }
+
+    .card {
+      min-width: 0;
+      padding: 18px;
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.025));
+    }
+    .card h3 { margin: 0 0 6px; font-size: 17px; }
+    .card p { margin: 0; color: var(--muted); font-size: 14px; }
+    .accent { border-color: rgba(122,162,255,.34); background: linear-gradient(180deg, rgba(122,162,255,.12), rgba(255,255,255,.025)); }
+    .warn { border-color: rgba(245,184,75,.35); background: linear-gradient(180deg, rgba(245,184,75,.12), rgba(255,255,255,.025)); }
+    .ok { border-color: rgba(98,210,111,.35); background: linear-gradient(180deg, rgba(98,210,111,.10), rgba(255,255,255,.025)); }
+
+    .diagram {
+      margin-top: 18px;
+      padding: 22px;
+      border-radius: 22px;
+      border: 1px solid rgba(122,162,255,.20);
+      background: #0d1320;
+      overflow-x: auto;
+    }
+    .flow { min-width: 840px; display: grid; gap: 16px; }
+    .flow-row { display: grid; grid-template-columns: repeat(4, minmax(170px,1fr)); gap: 14px; align-items: stretch; }
+    .flow-row.three { grid-template-columns: repeat(3, minmax(190px,1fr)); }
+    .flow-row.five { grid-template-columns: repeat(5, minmax(150px,1fr)); }
+    .box {
+      min-height: 98px;
+      padding: 14px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 16px;
+      background: var(--panel-2);
+      position: relative;
+    }
+    .box h4 { margin: 0 0 5px; font-size: 15px; color: var(--text); }
+    .box p { margin: 0; color: var(--muted); font-size: 13px; }
+    .box.main { border-color: rgba(122,162,255,.45); }
+    .box.renderer { border-color: rgba(103,232,249,.40); }
+    .box.safety { border-color: rgba(245,184,75,.42); }
+    .box.store { border-color: rgba(98,210,111,.38); }
+    .arrow { color: var(--blue); text-align: center; font-weight: 900; font-size: 20px; opacity: .9; }
+    .caption { color: var(--muted); font-size: 13px; margin-top: 12px; }
+
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td {
+      padding: 12px;
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    th { color: var(--text); background: rgba(255,255,255,.045); font-size: 13px; text-transform: uppercase; letter-spacing: .08em; }
+    td:first-child { color: var(--text); font-weight: 750; }
+    .table-wrap { overflow-x: auto; border: 1px solid rgba(255,255,255,.08); border-radius: 16px; }
+    .table-wrap table { min-width: 720px; }
+
+    .timeline { display: grid; gap: 12px; }
+    .slice {
+      display: grid;
+      grid-template-columns: 80px 1fr auto;
+      gap: 14px;
+      align-items: start;
+      padding: 16px;
+      border: 1px solid rgba(255,255,255,.09);
+      border-radius: 18px;
+      background: rgba(255,255,255,.035);
+    }
+    .slice-id { color: var(--cyan); font-weight: 900; font-size: 22px; }
+    .slice strong { display: block; margin-bottom: 4px; }
+    .slice p { margin: 0; color: var(--muted); }
+    .commits { color: var(--muted); font-size: 13px; text-align: right; }
+    @media (max-width: 680px) { .slice { grid-template-columns: 1fr; } .commits { text-align: left; } }
+
+    .checklist { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    .check {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 12px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 14px;
+      background: rgba(255,255,255,.035);
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .check span { color: var(--green); font-weight: 900; }
+    @media (max-width: 720px) { .checklist { grid-template-columns: 1fr; } }
+
+    .callout {
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid rgba(245,184,75,.35);
+      background: rgba(245,184,75,.10);
+      color: #ffe6ad;
+      margin-top: 16px;
+    }
+    .callout strong { color: #fff0c2; }
+
+    .footer { color: var(--muted); text-align: center; padding: 32px 0 10px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div class="eyebrow">Phase 1 implementation summary</div>
+      <h1>Bud Excalidraw Voice Copilot</h1>
+      <p class="subtitle">
+        A voice-first Electron + TypeScript canvas copilot built around the official
+        <code>@excalidraw/excalidraw</code> React package. Phase 1 adds embedded canvas creation,
+        editing, review proposals, undo, autosave, and LLM tool wiring.
+      </p>
+      <div class="status-row">
+        <div class="pill"><span class="dot green"></span>S0–S7 complete</div>
+        <div class="pill"><span class="dot green"></span>Mac build/tests passed</div>
+        <div class="pill"><span class="dot amber"></span>Windows runtime QA pending</div>
+        <div class="pill"><span class="dot blue"></span>Default hotkey: <code>CommandOrControl+Shift+Space</code></div>
+      </div>
+    </header>
+
+    <nav class="nav" aria-label="Sections">
+      <a href="#what">What changed</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#voice">Voice flow</a>
+      <a href="#operations">Operations</a>
+      <a href="#recovery">Undo + autosave</a>
+      <a href="#tools">Tools</a>
+      <a href="#timeline">Timeline</a>
+      <a href="#files">Files</a>
+      <a href="#qa">Windows QA</a>
+    </nav>
+
+    <section id="what">
+      <h2>What Phase 1 added</h2>
+      <p>
+        Bud now has an Excalidraw-first canvas surface. Users can open the canvas with a hotkey,
+        speak to create or edit shapes, ask Bud to propose visual changes as ghost elements, confirm
+        or cancel by voice, undo mistakes, and have sketches autosaved locally.
+      </p>
+      <div class="grid cols-4">
+        <div class="card accent"><h3>Embedded canvas</h3><p>Official Excalidraw React component in a dedicated Electron renderer window.</p></div>
+        <div class="card accent"><h3>Voice-first session</h3><p>Hotkey opens/focuses the canvas and toggles canvas-scoped listening.</p></div>
+        <div class="card ok"><h3>Safe operations</h3><p>Main-process controller gates destructive or ambiguous changes before applying.</p></div>
+        <div class="card ok"><h3>Persistence</h3><p>Dirty-interval autosave writes local <code>.excalidraw</code> sessions plus metadata index.</p></div>
+      </div>
+      <div class="callout">
+        <strong>Important:</strong> This has been validated with macOS build/type/test checks. Bud is Windows-targeted, so the real runtime smoke test still needs to happen on Windows before calling it production-ready.
+      </div>
+    </section>
+
+    <section id="architecture">
+      <h2>How it fits into Bud</h2>
+      <p>
+        The main architectural decision: <strong>the Electron main process owns policy and stateful behavior</strong>.
+        The renderer stays thin and only hosts Excalidraw plus IPC handlers that use the official Excalidraw API.
+      </p>
+      <div class="diagram" aria-label="High-level architecture diagram">
+        <div class="flow">
+          <div class="flow-row three">
+            <div class="box"><h4>Realtime Voice</h4><p>OpenAI/Cartesia voice pipeline emits speech events and tool calls.</p></div>
+            <div class="box main"><h4>Bud Main Process</h4><p><code>main.ts</code> wires hotkeys, tools, prompts, IPC, and lifecycle.</p></div>
+            <div class="box"><h4>Chat / Orchestrator</h4><p>Chat path gets the same <code>excalidraw_*</code> tools as voice.</p></div>
+          </div>
+          <div class="arrow">↓ tool calls / hotkey / IPC coordination</div>
+          <div class="flow-row five">
+            <div class="box main"><h4>ExcalidrawController</h4><p>Policy, safety, proposals, undo, autosave, session methods.</p></div>
+            <div class="box safety"><h4>SafetyGate</h4><p>Classifies immediate vs confirmation-required operations.</p></div>
+            <div class="box store"><h4>SnapshotRing</h4><p>Internal full-scene snapshots for undo fallback.</p></div>
+            <div class="box store"><h4>SessionStore</h4><p>Recent sessions metadata index, max 20 entries.</p></div>
+            <div class="box main"><h4>WindowManager</h4><p>Creates/focuses canvas window and routes IPC.</p></div>
+          </div>
+          <div class="arrow">↓ secure preload + typed IPC boundary</div>
+          <div class="flow-row three">
+            <div class="box renderer"><h4>Canvas Preload</h4><p>Exposes only approved canvas IPC channels to renderer.</p></div>
+            <div class="box renderer"><h4>Canvas Renderer</h4><p>React host in <code>App.tsx</code>; uses <code>canvas/ipc.ts</code>.</p></div>
+            <div class="box renderer"><h4>Official Excalidraw</h4><p><code>@excalidraw/excalidraw</code> API: <code>updateScene</code>, scene reads, ghost rendering.</p></div>
+          </div>
+        </div>
+      </div>
+      <p class="caption">
+        Key principle: model/tool callers never mutate the renderer directly. They call controller methods, which enforce safety and then send approved IPC to the canvas.
+      </p>
+    </section>
+
+    <section id="voice">
+      <h2>Voice session flow</h2>
+      <p>
+        The canvas is reached through a configurable global hotkey. Press once to open/focus Excalidraw and start the canvas voice session; press again to end listening while keeping the sketch.
+      </p>
+      <div class="diagram">
+        <div class="flow">
+          <div class="flow-row five">
+            <div class="box"><h4>1. User presses hotkey</h4><p><code>CommandOrControl+Shift+Space</code>; on Windows, <code>Ctrl+Shift+Space</code>.</p></div>
+            <div class="box main"><h4>2. Main process handles shortcut</h4><p>Global hotkey listener calls canvas session toggle.</p></div>
+            <div class="box main"><h4>3. Canvas window opens/focuses</h4><p>Window manager creates or focuses the Excalidraw window.</p></div>
+            <div class="box"><h4>4. Voice session starts</h4><p>Realtime mute state is managed for canvas-scoped listening.</p></div>
+            <div class="box renderer"><h4>5. HUD shows state</h4><p>Canvas HUD shows listening/proposal/saved states.</p></div>
+          </div>
+          <div class="arrow">Press hotkey again → end Bud listening session, keep sketch open</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="operations">
+      <h2>Operation and proposal flow</h2>
+      <p>
+        Phase 1 supports create, edit, review/propose, confirm/cancel, and undo through high-level operations.
+        Large, destructive, or ambiguous requests are not applied silently.
+      </p>
+      <div class="diagram">
+        <div class="flow">
+          <div class="flow-row five">
+            <div class="box"><h4>Intent</h4><p>Voice or chat asks for a drawing/edit/review.</p></div>
+            <div class="box"><h4><code>excalidraw_*</code> tool</h4><p>Tool wraps a controller method.</p></div>
+            <div class="box main"><h4>Controller</h4><p>Reads scene summary and validates operation.</p></div>
+            <div class="box safety"><h4>Safety gate</h4><p>Immediate apply or requires confirmation.</p></div>
+            <div class="box renderer"><h4>Renderer update</h4><p>Approved changes use Excalidraw <code>updateScene</code>.</p></div>
+          </div>
+          <div class="arrow">If review/confirmation is needed</div>
+          <div class="flow-row three">
+            <div class="box safety"><h4>Ghost proposal</h4><p>Dashed/translucent ghost elements render on the canvas.</p></div>
+            <div class="box main"><h4>Voice confirm/cancel/revise</h4><p>No primary Approve/Decline buttons; confirmation is spoken or tool-driven.</p></div>
+            <div class="box renderer"><h4>Commit or clear</h4><p>Confirm replaces ghosts with real elements; cancel clears ghosts.</p></div>
+          </div>
+        </div>
+      </div>
+      <div class="grid cols-3" style="margin-top:16px">
+        <div class="card ok"><h3>Immediate</h3><p>Small safe creates/updates can apply directly.</p></div>
+        <div class="card warn"><h3>Confirmation required</h3><p>Destructive, bulk, or ambiguous changes go through proposal/confirm.</p></div>
+        <div class="card"><h3>Unsupported in Phase 1</h3><p><code>replaceScene</code> and <code>importScene</code> are not implemented as raw scene operations.</p></div>
+      </div>
+    </section>
+
+    <section id="recovery">
+      <h2>Undo, autosave, and recovery</h2>
+      <p>
+        Phase 1 protects work with a controller-managed snapshot ring and local autosave. Snapshots are internal and ghost-free.
+      </p>
+      <div class="diagram">
+        <div class="flow">
+          <div class="flow-row five">
+            <div class="box main"><h4>Before Bud mutation</h4><p>Controller captures internal full-scene snapshot.</p></div>
+            <div class="box store"><h4>SnapshotRing</h4><p>Bounded by count/age; default 50 / 30 min.</p></div>
+            <div class="box"><h4>Undo request</h4><p>Try native Excalidraw undo first.</p></div>
+            <div class="box safety"><h4>Verify scene changed</h4><p>If native undo fails/no-op, fall back.</p></div>
+            <div class="box store"><h4>Snapshot restore</h4><p>Restore ghost-free snapshot through official API.</p></div>
+          </div>
+          <div class="arrow">Autosave path</div>
+          <div class="flow-row three">
+            <div class="box main"><h4>Scene changed</h4><p>Renderer publishes <code>canvas:scene-change</code>; controller marks dirty.</p></div>
+            <div class="box store"><h4>5s dirty interval</h4><p>Writes current session <code>.excalidraw</code> file.</p></div>
+            <div class="box store"><h4>Recent index</h4><p><code>SessionStore</code> saves metadata only, max 20 sessions.</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tools">
+      <h2>S7 tool surface</h2>
+      <p>
+        The same six tools are registered for Realtime voice and chat/Orchestrator. Each calls an existing controller method; no tool exposes raw scene JSON or internal snapshots.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Tool</th><th>Controller method</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td><code>excalidraw_readScene</code></td><td><code>readScene()</code></td><td>Returns compact <code>SceneSummary</code>; excludes ghosts and full scene JSON.</td></tr>
+            <tr><td><code>excalidraw_applyOperation</code></td><td><code>applyOperation(operation)</code></td><td>Applies safe operations through the deterministic safety gate.</td></tr>
+            <tr><td><code>excalidraw_proposeOperation</code></td><td><code>proposeOperation(operation, options?)</code></td><td>Renders ghost proposal elements for visual review.</td></tr>
+            <tr><td><code>excalidraw_confirmProposal</code></td><td><code>confirmProposal(proposalId, optionId?)</code></td><td>Commits pending proposal or selected review option.</td></tr>
+            <tr><td><code>excalidraw_cancelProposal</code></td><td><code>cancelProposal(proposalId)</code></td><td>Clears pending proposal ghosts without applying.</td></tr>
+            <tr><td><code>excalidraw_undo</code></td><td><code>undo()</code></td><td>Reverts last Bud-applied mutation via native undo or snapshot fallback.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="privacy">
+      <h2>Safety and privacy contract</h2>
+      <div class="grid cols-2">
+        <div class="card ok"><h3>Compact summaries only</h3><p>Prompts and tools get <code>SceneSummary</code>, not raw Excalidraw element graphs.</p></div>
+        <div class="card ok"><h3>Ghosts are transient</h3><p>Proposal ghosts are excluded from read summaries, autosaves, and snapshots.</p></div>
+        <div class="card ok"><h3>Full snapshots stay internal</h3><p>Snapshot data is used only by controller-managed undo/autosave paths.</p></div>
+        <div class="card warn"><h3>Safety gate is deterministic</h3><p>Large/destructive/ambiguous operations require confirmation; tools cannot bypass it.</p></div>
+      </div>
+    </section>
+
+    <section id="timeline">
+      <h2>S0–S7 timeline</h2>
+      <div class="timeline">
+        <div class="slice"><div class="slice-id">S0</div><div><strong>Renderer scaffold</strong><p>React/Vite renderer with embedded official Excalidraw canvas.</p></div><div class="commits"><code>ea80297</code></div></div>
+        <div class="slice"><div class="slice-id">S1</div><div><strong>Window manager + read scene IPC</strong><p>Main/renderer boundary, controller skeleton, compact scene summaries.</p></div><div class="commits"><code>182c6ba</code></div></div>
+        <div class="slice"><div class="slice-id">S2</div><div><strong>Hotkey + canvas-scoped session</strong><p>Configurable global hotkey toggles Excalidraw voice session.</p></div><div class="commits"><code>21fef52</code><br><code>4d1ac48</code></div></div>
+        <div class="slice"><div class="slice-id">S3</div><div><strong>Apply operation + safety gate</strong><p>Safe deterministic operation application; risky ops require confirmation.</p></div><div class="commits"><code>fc78671</code><br><code>867084c</code></div></div>
+        <div class="slice"><div class="slice-id">S4</div><div><strong>Proposal lifecycle + ghosts</strong><p>Review/propose, confirm, cancel, revise, and review options.</p></div><div class="commits"><code>6325861</code><br><code>1ba4da0</code></div></div>
+        <div class="slice"><div class="slice-id">S5</div><div><strong>Undo + snapshot ring</strong><p>Native undo first, snapshot fallback, internal full-scene recovery.</p></div><div class="commits"><code>68795da</code><br><code>1ed0336</code></div></div>
+        <div class="slice"><div class="slice-id">S6</div><div><strong>Autosave + recent sessions</strong><p>Dirty-interval autosave and lightweight recent-session metadata.</p></div><div class="commits"><code>c5e1b66</code></div></div>
+        <div class="slice"><div class="slice-id">S7</div><div><strong>Tool registration + prompt wiring</strong><p>Six <code>excalidraw_*</code> tools available to Realtime voice and chat.</p></div><div class="commits"><code>add1104</code></div></div>
+      </div>
+    </section>
+
+    <section id="files">
+      <h2>Key file map</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>File</th><th>What it owns</th></tr></thead>
+          <tbody>
+            <tr><td><code>app/src/main/excalidraw/ExcalidrawController.ts</code></td><td>Policy, safety, proposals, undo, autosave, and controller methods behind tools.</td></tr>
+            <tr><td><code>app/src/main/excalidraw/ExcalidrawWindowManager.ts</code></td><td>Creates/focuses canvas window and sends approved IPC to renderer.</td></tr>
+            <tr><td><code>app/src/main/excalidraw/excalidrawTypes.ts</code></td><td>Shared types for operations, summaries, proposals, results, and IPC payloads.</td></tr>
+            <tr><td><code>app/src/main/excalidraw/safetyGate.ts</code></td><td>Classifies operations as immediate, confirmation-required, unsupported, or not found.</td></tr>
+            <tr><td><code>app/src/main/excalidraw/SnapshotRing.ts</code></td><td>Bounded internal undo snapshot ring.</td></tr>
+            <tr><td><code>app/src/main/excalidraw/SessionStore.ts</code></td><td>Recent sessions index: metadata only, max 20 entries.</td></tr>
+            <tr><td><code>app/src/main/excalidraw/createExcalidrawTools.ts</code></td><td>Creates six Realtime and chat tool registrations.</td></tr>
+            <tr><td><code>app/src/main/excalidraw/excalidrawPrompts.ts</code></td><td>Excalidraw instructions appended to voice and orchestrator system prompts.</td></tr>
+            <tr><td><code>app/src/main/canvasPreload.ts</code></td><td>Secure context bridge for canvas IPC.</td></tr>
+            <tr><td><code>app/src/renderer/canvas/App.tsx</code></td><td>React shell hosting the official Excalidraw component and HUD.</td></tr>
+            <tr><td><code>app/src/renderer/canvas/ipc.ts</code></td><td>Renderer-side IPC facade that applies scenes, ghosts, undo shortcuts, snapshots.</td></tr>
+            <tr><td><code>app/src/main/main.ts</code></td><td>App bootstrap: controller, hotkeys, IPC handlers, tools, prompts, session events.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="validation">
+      <h2>Validation completed on Mac</h2>
+      <p>These commands passed locally. They prove compile/type/test confidence, but not Windows runtime behavior.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Command</th><th>Coverage</th></tr></thead>
+          <tbody>
+            <tr><td><code>npm run build</code></td><td>Main TypeScript build + canvas Vite build.</td></tr>
+            <tr><td><code>npx tsc --noEmit -p src/renderer/canvas/tsconfig.json</code></td><td>Canvas renderer type check.</td></tr>
+            <tr><td><code>npx tsc --noEmit -p tsconfig.json</code></td><td>Main process type check.</td></tr>
+            <tr><td><code>npx ts-node src/main/excalidraw/createExcalidrawTools.test.ts</code></td><td>S7 tool names and routing.</td></tr>
+            <tr><td><code>npx ts-node src/main/excalidraw/safetyGate.test.ts</code></td><td>S3 deterministic safety classification.</td></tr>
+            <tr><td><code>npx ts-node src/main/excalidraw/ExcalidrawController.test.ts</code></td><td>Core controller and hotkey/session behavior.</td></tr>
+            <tr><td><code>npx ts-node src/main/excalidraw/ExcalidrawController.proposals.test.ts</code></td><td>S4 proposal lifecycle.</td></tr>
+            <tr><td><code>npx ts-node src/main/excalidraw/ExcalidrawController.undo.test.ts</code></td><td>S5 undo + snapshot fallback.</td></tr>
+            <tr><td><code>npx ts-node src/main/excalidraw/ExcalidrawController.autosave.test.ts</code></td><td>S6 autosave behavior.</td></tr>
+            <tr><td><code>npx ts-node src/main/excalidraw/SnapshotRing.test.ts</code></td><td>Snapshot ring eviction and LIFO behavior.</td></tr>
+            <tr><td><code>npx ts-node src/main/excalidraw/SessionStore.test.ts</code></td><td>Recent-session store and corrupt-index tolerance.</td></tr>
+            <tr><td><code>npx ts-node src/main/globalHotkey.test.ts</code></td><td>Canvas hotkey registration/update behavior.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="qa">
+      <h2>Windows runtime QA checklist</h2>
+      <p>This is the checklist for the GitHub owner/team member testing on Windows.</p>
+      <div class="checklist">
+        <div class="check"><span>□</span><div>Launch Bud Electron app successfully on Windows.</div></div>
+        <div class="check"><span>□</span><div>Press <code>Ctrl+Shift+Space</code>; Excalidraw window opens/focuses.</div></div>
+        <div class="check"><span>□</span><div>Press hotkey again; voice session ends but sketch remains.</div></div>
+        <div class="check"><span>□</span><div>Voice create: draw rectangle/text/circle on canvas.</div></div>
+        <div class="check"><span>□</span><div>Voice edit: update selected or referenced element safely.</div></div>
+        <div class="check"><span>□</span><div>Review proposal renders ghost elements, not committed elements.</div></div>
+        <div class="check"><span>□</span><div>Voice “apply” confirms proposal; “cancel” clears ghosts.</div></div>
+        <div class="check"><span>□</span><div>“Undo that” returns quickly through native undo or snapshot fallback.</div></div>
+        <div class="check"><span>□</span><div>Autosave writes <code>.excalidraw</code> file and recent-session metadata.</div></div>
+        <div class="check"><span>□</span><div>Realtime speech/interruption clears pending proposal ghosts.</div></div>
+        <div class="check"><span>□</span><div>Chat/Orchestrator can call the same six <code>excalidraw_*</code> tools.</div></div>
+        <div class="check"><span>□</span><div>No raw scene JSON appears in prompts, status, logs, or tool output.</div></div>
+      </div>
+    </section>
+
+    <div class="footer">
+      Bud Excalidraw Voice Copilot · Phase 1 S0–S7 complete · Windows runtime QA pending
+    </div>
+  </div>
+</body>
+</html>
