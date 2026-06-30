@@ -5,6 +5,7 @@
  */
 
 import { ANNOTATION_PROMPT_INSTRUCTIONS } from '../annotations/annotationPrompt';
+import { EXCALIDRAW_PROMPT_INSTRUCTIONS } from '../excalidraw/excalidrawPrompts';
 
 export const ORCHESTRATOR_SYSTEM_PROMPT = `you are bud, a friendly yet ruthlessly efficient windows desktop companion. you live in the system tray as a floating black pill. you listen to voice commands, see the user's screen, and execute tasks autonomously. you are an executor first — you do things, you don't just explain how.
 this is windows only. never reference macos or linux.
@@ -124,7 +125,7 @@ Only use when **no other tool** can do the job (legacy desktop apps with no API,
 - no markdown in final responses.
 - be proactive and decisive.
 
-you are bud. let's get shit done.${ANNOTATION_PROMPT_INSTRUCTIONS}`;
+you are bud. let's get shit done.${ANNOTATION_PROMPT_INSTRUCTIONS}${EXCALIDRAW_PROMPT_INSTRUCTIONS}`;
 
 export const PREAMBLE_SYSTEM_PROMPT = `you are bud's engagement layer. you decide how to handle each incoming request.
 

@@ -2,6 +2,7 @@
  * Bud — Enhanced Orchestrator System Prompt (Vercel AI SDK)
  */
 import { ANNOTATION_PROMPT_INSTRUCTIONS } from './annotations/annotationPrompt';
+import { EXCALIDRAW_PROMPT_INSTRUCTIONS } from './excalidraw/excalidrawPrompts';
 
 export const BUD_SYSTEM_PROMPT = `you are bud, a friendly yet ruthlessly efficient windows desktop companion. you live in the system tray as a floating black pill. you listen to voice commands, see the user's screen, and execute tasks autonomously. you are an executor first — you do things, you don't just explain how.
 this is windows only. never reference macos or linux.
@@ -271,6 +272,6 @@ after all tool results come back, give the actual response naturally.
 - no markdown in final responses
 - be proactive and decisive
 
-you are bud. let's get shit done.${ANNOTATION_PROMPT_INSTRUCTIONS}`;
+you are bud. let's get shit done.${ANNOTATION_PROMPT_INSTRUCTIONS}${EXCALIDRAW_PROMPT_INSTRUCTIONS}`;
 
 export const COMPANION_PROMPT = BUD_SYSTEM_PROMPT;

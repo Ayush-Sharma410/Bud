@@ -82,6 +82,7 @@ import { ToolExecutor } from './realtime/RealtimeToolBridge';
 import { RealtimeSDPServer } from './realtime/RealtimeSDPServer';
 import { AnnotationController } from './annotations/AnnotationController';
 import { createDrawAnnotationTools } from './annotations/createDrawAnnotationTool';
+import { createExcalidrawTools } from './excalidraw/createExcalidrawTools';
 import { ExcalidrawWindowManager } from './excalidraw/ExcalidrawWindowManager';
 import { ExcalidrawController } from './excalidraw/ExcalidrawController';
 import { SessionStore } from './excalidraw/SessionStore';
@@ -296,10 +297,12 @@ app.whenReady().then(async () => {
 
     realtimeVoiceManager.on('speech.started', () => {
       annotationController.clearAnnotations();
+      excalidrawController.clearProposals();
     });
 
     realtimeVoiceManager.on('interruption', () => {
       annotationController.clearAnnotations();
+      excalidrawController.clearProposals();
     });
 
     console.log('🎙️ CartesiaRealtimeVoiceManager created — will register tools after panel init');
@@ -334,10 +337,12 @@ app.whenReady().then(async () => {
     });
     realtimeVoiceManager.on('speech.started', () => {
       annotationController.clearAnnotations();
+      excalidrawController.clearProposals();
     });
 
     realtimeVoiceManager.on('interruption', () => {
       annotationController.clearAnnotations();
+      excalidrawController.clearProposals();
     });
 
     console.log('🔌 RealtimeVoiceManager created (WebRTC) — will register tools after panel init');
@@ -378,6 +383,7 @@ app.whenReady().then(async () => {
   // 10. Register tools with RealtimeVoiceManager and start it
   if (realtimeVoiceManager) {
     const drawAnnotationTools = createDrawAnnotationTools(annotationController);
+    const excalidrawTools = createExcalidrawTools(excalidrawController);
 
     const captureScreenExecutor: ToolExecutor = {
       name: 'captureScreen',
@@ -428,6 +434,7 @@ app.whenReady().then(async () => {
       captureScreenExecutor,
       waitForUserExecutor,
       drawAnnotationTools.realtimeExecutor,
+      ...excalidrawTools.realtimeExecutors,
     ];
     realtimeVoiceManager.registerTools(toolExecutors);
     console.log('🚀 Realtime tools registered — WebRTC connect will fire when panel is ready');
@@ -659,6 +666,7 @@ export async function executeChatCompletion(
 ) {
   try {
     const drawAnnotationTools = createDrawAnnotationTools(annotationController);
+    const excalidrawTools = createExcalidrawTools(excalidrawController);
 
     const tools: any = OrchestratorAgent.wrapToolsWithRetry(
       {
@@ -670,6 +678,7 @@ export async function executeChatCompletion(
         memory: createMemoryTool(memoryDir),
         readFile: createFileReaderTool(),
         drawAnnotation: drawAnnotationTools.vercelTool,
+        ...excalidrawTools.vercelTools,
         captureScreen: tool({
           description: 'Capture screenshots of all displays for visual context. Use when you need to see the screen to answer questions or decide on actions.',
           inputSchema: jsonSchema({
