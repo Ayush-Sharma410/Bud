@@ -10,6 +10,7 @@ import type {
   ExcalidrawElement,
   ExcalidrawTextElement,
   ExcalidrawLinearElement,
+  ExcalidrawArrowElement,
   ExcalidrawFreeDrawElement,
   ExcalidrawElementType,
 } from '@excalidraw/excalidraw/element/types';
@@ -238,6 +239,7 @@ function createElementFromOperation(op: CreateElementOperation): ExcalidrawEleme
       const textElement = {
         ...base,
         type: 'text' as const,
+        roundness: null,
         text: op.text ?? '',
         fontSize: 20,
         fontFamily: FONT_FAMILY.Virgil as ExcalidrawTextElement['fontFamily'],
@@ -255,7 +257,24 @@ function createElementFromOperation(op: CreateElementOperation): ExcalidrawEleme
     case 'diamond': {
       return { ...base, type: op.elementType } as ExcalidrawElement;
     }
-    case 'arrow':
+    case 'arrow': {
+      const points: readonly LocalPoint[] = [
+        [0, 0],
+        [op.width, op.height],
+      ];
+      const arrow: ExcalidrawArrowElement = {
+        ...base,
+        type: 'arrow',
+        elbowed: false,
+        points,
+        lastCommittedPoint: null,
+        startBinding: null,
+        endBinding: null,
+        startArrowhead: null,
+        endArrowhead: 'arrow',
+      } as ExcalidrawArrowElement;
+      return arrow as ExcalidrawElement;
+    }
     case 'line': {
       const points: readonly LocalPoint[] = [
         [0, 0],
@@ -263,13 +282,13 @@ function createElementFromOperation(op: CreateElementOperation): ExcalidrawEleme
       ];
       const linear: ExcalidrawLinearElement = {
         ...base,
-        type: op.elementType,
+        type: 'line',
         points,
         lastCommittedPoint: null,
         startBinding: null,
         endBinding: null,
         startArrowhead: null,
-        endArrowhead: op.elementType === 'arrow' ? 'arrow' : null,
+        endArrowhead: null,
       } as ExcalidrawLinearElement;
       return linear as ExcalidrawElement;
     }
@@ -281,6 +300,7 @@ function createElementFromOperation(op: CreateElementOperation): ExcalidrawEleme
       const freeDraw: ExcalidrawFreeDrawElement = {
         ...base,
         type: 'freedraw',
+        roundness: null,
         points,
         pressures: [0.5, 0.5],
         simulatePressure: true,

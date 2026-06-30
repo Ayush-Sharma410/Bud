@@ -269,5 +269,31 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
     if (applyRequest) throw new Error('canvas:apply-scene should not be sent for clearCanvas');
   });
 
+  await test('applyOperation timeout resolves with structured error', async () => {
+    const wm = new ExcalidrawWindowManager();
+    let applyRequest: any = null;
+    wm.openOrFocus = async () => wm.getWindow() as any;
+    (wm as any).sendToCanvas = (channel: string, data: any) => {
+      if (channel === 'canvas:apply-scene') applyRequest = data;
+    };
+
+    const controller = new ExcalidrawController({ windowManager: wm, timeoutMs: 25 });
+    controller.onSceneChange(makeScene());
+
+    const result = await controller.applyOperation({
+      kind: 'create',
+      elementType: 'rectangle',
+      id: 'r-timeout',
+      x: 0,
+      y: 0,
+      width: 10,
+      height: 10,
+    });
+
+    if (!applyRequest) throw new Error('canvas:apply-scene was not sent');
+    if (result.status !== 'error') throw new Error(`expected error, got ${result.status}`);
+    if (!result.reason.includes('timed out')) throw new Error(`reason missing timeout: ${result.reason}`);
+  });
+
   console.log('\n🎉 ExcalidrawController S2/S3 tests passed');
 })();

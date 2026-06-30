@@ -187,7 +187,10 @@ export class ExcalidrawController {
       const requestId = randomUUID();
       const timer = setTimeout(() => {
         this.pendingApplies.delete(requestId);
-        reject(new Error(`applyOperation timed out after ${this.timeoutMs}ms`));
+        resolve({
+          status: 'error',
+          reason: `applyOperation timed out after ${this.timeoutMs}ms`,
+        });
       }, this.timeoutMs);
 
       this.pendingApplies.set(requestId, { resolve, reject, timer });
