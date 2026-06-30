@@ -297,7 +297,7 @@ export class ExcalidrawController {
    * Ask the renderer for a full internal scene snapshot (elements + appState).
    * This snapshot is never returned to LLM/tool callers.
    */
-  async requestSnapshot(): Promise<FullSceneSnapshot> {
+  private async requestSnapshot(): Promise<FullSceneSnapshot> {
     await this.windowManager.openOrFocus();
 
     return new Promise<FullSceneSnapshot>((resolve, reject) => {

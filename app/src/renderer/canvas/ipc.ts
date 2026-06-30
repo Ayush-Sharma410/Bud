@@ -206,9 +206,6 @@ export function initCanvasIPC(): void {
     }
 
     try {
-      // Ensure no proposal ghosts become real scene state after the restore.
-      const current = apiRef.getSceneElementsIncludingDeleted();
-      const cleaned = removeGhosts(current);
       const restoredElements = (request.snapshot.elements as ExcalidrawElement[]) ?? [];
       apiRef.updateScene({
         elements: restoredElements,
@@ -267,10 +264,19 @@ function dispatchShortcut(key: string, opts: { shift: boolean }): void {
   };
 
   try {
-    window.dispatchEvent(new KeyboardEvent('keydown', baseInit));
-    window.dispatchEvent(new KeyboardEvent('keyup', baseInit));
+    // Excalidraw's default undo/redo handler is container-scoped
+    // (handleKeyboardGlobally=false). Dispatch on the mounted Excalidraw
+    // container so React's onKeyDown handler receives the event.
+    const target = document.querySelector('.excalidraw') ?? window;
+
+    if (target instanceof HTMLElement) {
+      target.focus();
+    }
+
+    target.dispatchEvent(new KeyboardEvent('keydown', baseInit));
+    target.dispatchEvent(new KeyboardEvent('keyup', baseInit));
   } catch {
-    // Some test environments may not have a real `window`; fall back silently.
+    // Some test environments may not have a real DOM; fall back silently.
   }
 }
 
