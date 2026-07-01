@@ -113,7 +113,7 @@ export class OrchestratorAgent {
     const signal = options.signal;
 
     try {
-      const modelOptions: CreateLanguageModelOptions = { provider: 'openai' };
+      const modelOptions: CreateLanguageModelOptions = {};
       if (this.baseURL) modelOptions.baseURL = this.baseURL;
 
       // Decision from the preamble stream, resolved once we've seen the marker.
@@ -125,7 +125,7 @@ export class OrchestratorAgent {
       const preambleDecision = new Promise<PreambleDecision>(async (resolve) => {
         const preambleMessages = this.history.slice(-2);
         const preambleResult = streamText({
-          model: createLanguageModel(this.preambleModel, { provider: 'openai' }),
+          model: createLanguageModel(this.preambleModel),
           system: this.preambleSystem,
           messages: preambleMessages,
           tools: {},

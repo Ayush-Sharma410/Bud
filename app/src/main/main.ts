@@ -485,7 +485,7 @@ ipcMain.on('send-chat-message', async (_event, userMessage) => {
 
     await executeChatCompletion(
       (chunk) => sendToPanel('chat-chunk', chunk),
-      () => sendToPanel('chat-end'),
+      () => sendToPanel('chat-end', null),
       (errText) => sendToPanel('chat-error', errText)
     );
   } catch (err: any) {
