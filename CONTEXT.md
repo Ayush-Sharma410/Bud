@@ -1,105 +1,87 @@
 # Bud
 
-A Windows desktop companion that lets a user control and interact with their computer through voice commands. Forked from the macOS app Clicky, rebuilt from scratch for Windows using Electron.
+An AI-native, cross-platform (Windows / macOS / Linux) Electron voice copilot for Excalidraw. Bud listens to the user's voice, sees the Excalidraw canvas, responds with spoken answers, and draws, edits, and organizes diagrams on the user's behalf. Forked from the macOS app Clicky, rebuilt from scratch.
 
 ## Language
 
 **Bud**:
-The Windows desktop companion app. A system tray and floating top-bar application that listens to the user's voice, sees their screen, responds with spoken answers, and provides a text-based chat agent. Can point at UI elements on screen.
+The desktop voice copilot app. A system tray and floating top-bar application that listens to the user's voice, reasons over the Excalidraw canvas, responds with spoken answers, and drives the canvas through tools. Runs on Windows, macOS, and Linux.
 _Avoid_: Clicky, assistant, agent
 
+**Excalidraw Canvas**:
+The primary work surface — an embedded instance of the official `@excalidraw/excalidraw` React component running in a dedicated BrowserWindow. Bud reads its scene state and mutates it through the imperative Excalidraw API over a secure preload/IPC bridge. Self-hosted fonts and assets via `window.EXCALIDRAW_ASSET_PATH`.
+_Avoid_: whiteboard, drawing board, canvas window
+
 **Floating Pill**:
-The collapsed, always-on-top, minimal black bar located at the top-center of the screen. Indicates the active mode (listening, speaking, muted, or fallback) and expands into the Chat Agent Panel when clicked.
+The collapsed, always-on-top, minimal black bar at the top-center of the screen. Indicates the active mode (listening, speaking, muted, fallback) and expands into the Chat Agent Panel when clicked.
 _Avoid_: status bar, system island, floating notch
 
 **Chat Agent Panel**:
-The expanded view of the Floating Pill that provides a text chat interface, file drag-and-drop, and triggers tool-based tasks using the Vercel AI SDK.
+The expanded view of the Floating Pill that provides a text chat interface, file drag-and-drop, and tool-based tasks using the Vercel AI SDK. Shares the same Orchestrator and tools as the voice path.
 _Avoid_: settings window, control panel, chat window
 
-**Realtime Voice Pipeline**:
-The primary voice path powered by `gpt-realtime-2`, OpenAI's state-of-the-art reasoning voice model. A WebRTC peer connection from the Electron renderer (Chromium) to the OpenAI Realtime API that handles speech understanding, internal reasoning, function calling, streaming audio responses, and interruptions in a single round-trip. Replaces the old STT → GPT → TTS chain. Audio is captured natively by WebRTC via `getUserMedia` — no temporary files, no ffmpeg, no manual PCM encoding, no separate STT or TTS requests. The model reasons internally before speaking or calling tools, enabling better instruction following and more precise tool use.
-_Avoid_: realtime mode, voice engine, speech pipeline
+**Voice Pipeline**:
+The primary voice path: microphone capture → Cartesia streaming STT → Orchestrator (LLM reasoning + tool calls) → Cartesia streaming TTS → audio playback. A single, linear, request-response loop — no WebRTC, no server-side session, no stateful real-time connection. Replaces the former OpenAI Realtime pipeline.
+_Avoid_: realtime pipeline, voice engine, speech pipeline
 
-**Realtime Session**:
-The WebRTC connection to the OpenAI Realtime API. The peer connection lives in the renderer process; the main process coordinates via IPC. An embedded HTTP server on localhost handles SDP exchange. Maintains server-side conversation state, handles session lifecycle, data channel events, and reconnection with exponential backoff. Disconnects after 5 minutes of inactivity and reconnects on next speech detection.
-_Avoid_: websocket, connection, socket
+**Cartesia STT**:
+Streaming speech-to-text over a WebSocket to Cartesia (`CartesiaSTTSession`). Transcribes the user's utterance in real time; the final transcript is handed to the Orchestrator.
+_Avoid_: transcriber, speech recognizer
 
-**Realtime Tool Bridge**:
-The adapter layer that translates OpenAI Realtime function call events into existing Bud tool executions. Forwards calls to the same tool implementations used by the Chat Agent Panel — does not duplicate business logic. All tool calls are async; the Realtime session never blocks waiting for results.
-_Avoid_: tool adapter, function mapper
+**Cartesia TTS**:
+Streaming text-to-speech over a WebSocket to Cartesia (`CartesiaTTSSession`, Sonic models). Receives Orchestrator output token-by-token and plays audio back with low latency. Supports interruption — when the user starts speaking, playback stops immediately.
+_Avoid_: synthesizer, voice output
 
-**Realtime Voice Manager**:
-The orchestrator that owns the Realtime Session, tool registration, and reconnection logic. Audio capture and playback are handled natively by WebRTC in the renderer — no manual audio transport needed. This is the new primary voice entrypoint.
-_Avoid_: voice controller, audio manager
+**Orchestrator**:
+The LLM reasoning core (`OrchestratorAgent`) that sits between STT and TTS. Receives the transcript (or chat message), holds conversation history, calls tools, streams a text response, and emits TTS markers. Two-model split: a fast preamble model for triage and a main model for reasoning. Wraps tool calls with retry via `RetryToolExecutor`.
+_Avoid_: brain, controller, LLM router
 
-**Always-On Listening**:
-Bud's default listening mode. The WebRTC peer connection streams audio continuously to the Realtime Session. Bud responds to all detected speech. The user can mute via Ctrl+Alt+M or the tray menu. The Floating Pill shows real-time state: gray (idle), red border (speech detected), blue (responding), red (muted), yellow (fallback).
-_Avoid_: always listening, wake word, hotword
+**Tools**:
+The four capabilities Bud exposes to the Orchestrator: `searchWeb`, `excalidraw` (a bundle of six canvas sub-tools), `memoryTool`, and `spawnAgent`. Tools are registered in `tools/index.ts` and execute asynchronously; results are enriched by `ToolResultEnricher` before being returned to the model.
+_Avoid_: functions, plugins, actions
+
+**Excalidraw Tools**:
+The six canvas sub-tools bundled under the `excalidraw` tool: `create-element`, `update-element`, `delete-element`, `group-elements`, `read-scene`, and `apply-diff`. Each maps to an imperative API call on the embedded Excalidraw instance through the preload/IPC bridge.
+_Avoid_: drawing commands, canvas actions
+
+**Memory Tool**:
+A persistent key-value memory backed by SQLite (`better-sqlite3`) that Bud uses to recall user preferences, past diagrams, and context across sessions. Exposed as `memory_save`, `memory_get`, and `memory_search`.
+_Avoid_: notes, knowledge base
+
+**Spawn Agent**:
+An async background worker tool (`spawnAgent`, renamed from `spawnWorker`) that forks a constrained worker with its own LLM loop and a reduced toolset (`searchWeb` + `memory` only — it cannot reach the canvas). Used for long-running research or multi-step lookups that should not block the main conversation. Reports progress back to the Orchestrator via the worker event bus.
+_Avoid_: worker, subprocess, background job
+
+**Tray**:
+The system tray icon and menu (`TrayManager`) that shows status, toggles mute, opens settings, and quits. Cross-platform via Electron's `Tray` API.
+_Avoid_: system tray icon, menu bar item
+
+**Global Hotkey**:
+The global keyboard shortcut (default Ctrl+Alt+M / Cmd+Alt+M) that toggles the microphone on and off. Implemented via Electron's `globalShortcut` — no native hook library. When muted, audio is not captured and the Floating Pill shows a red border with "Muted".
+_Avoid_: hotkey, shortcut, keyboard shortcut
 
 **Mute Toggle**:
-The global hotkey (Ctrl+Alt+M) that toggles the microphone on and off. When muted, audio is not streamed to the Realtime Session and the Floating Pill shows a red border with "Muted" label.
+The act of toggling the microphone via the Global Hotkey or tray menu. When muted, the Floating Pill shows a red border with "Muted".
 _Avoid_: mute button, mic toggle
 
-**Voice Provider**:
-(Deprecated / Legacy) A pluggable backend that handled the full voice loop via STT → GPT → TTS. Two implementations existed: Modal (open-source models on GPU) and Local (Ollama on the user's machine). Now replaced by the Realtime Voice Pipeline. The old code is preserved but unused.
-_Avoid_: voice mode, speech engine
-
-**Vision Provider**:
-The backend that analyzes screenshots of the user's screen and generates context-aware responses. Runs an open-source VLM on Modal via vLLM with an OpenAI-compatible API.
-_Avoid_: screen reader, image analyzer
+**Settings**:
+A self-contained settings model (`SettingsManager`) persisted to JSON. Holds only `model`, `muteHotkey`, and `excalidraw` config. Voice (Cartesia) and LLM credentials are read from environment variables, not settings.
+_Avoid_: preferences, config panel
 
 **Interaction**:
-A single voice exchange: Bud is always listening, detects speech via server-side VAD, processes the utterance through the Realtime Voice Pipeline, and speaks the response back. Supports interruptions — the user can speak at any time to cut Bud off.
+A single voice exchange: Bud detects speech end via STT, processes the utterance through the Orchestrator, and speaks the response back via TTS. The user can interrupt Bud mid-response by speaking — playback stops and the new utterance is processed.
 _Avoid_: session, conversation, request
-
-**Element Pointing**:
-The ability for Bud's cursor overlay to fly to and visually highlight a specific UI element on screen, guided by coordinates returned from the Vision Provider.
-_Avoid_: cursor animation, pointing mode
-
-**Companion Overlay**:
-The transparent, always-on-top window that displays Bud's cursor, response text, and waveform animations. Non-interactive — it never steals focus from the user's active window.
-_Avoid_: overlay window, cursor window, HUD
-
-**Push-to-Talk Hotkey**:
-(Legacy) The global keyboard shortcut (Ctrl+Alt) that was used to start and stop voice recording in the old pipeline. Still functional as a fallback but no longer the primary interaction mode — Bud now uses Always-On Listening.
-_Avoid_: keyboard shortcut, hotkey, shortcut
-
-## Computer Use
-
-**Computer Use**:
-Bud's ability to autonomously control the user's Windows desktop — moving the mouse, clicking, typing, and pressing keys — to complete tasks the user requests via voice.
-_Avoid_: automation, computer control, RPA
-
-**Agent Task**:
-A single unit of autonomous computer use work. Created when the user issues a voice command that requires desktop control. Runs an Agent Loop until complete or aborted. Multiple Agent Tasks can exist concurrently.
-_Avoid_: job, workflow, macro
-
-**Task Plan**:
-(Deprecated / Not used) The agent determines actions dynamically step-by-step rather than compiling an upfront structured plan.
-_Avoid_: script, runbook, recipe
-
-**Agent Loop**:
-The repeating cycle that executes actions reactively: capture screenshot → send to VLM with current context and action history → VLM returns the next single action → execute via Action Executor → repeat. Includes built-in verification — the VLM checks if the previous action succeeded before deciding the next one.
-_Avoid_: execution loop, control loop, CUA loop
-
-**Action Executor**:
-The local module that translates VLM action tags into physical input events on Windows via nut-js. Supports click, double-click, right-click, type, press, scroll, wait, launch, and done.
-_Avoid_: robot, input simulator, macro engine
-
-**Action Queue**:
-A serialized queue that ensures only one Agent Task actuates (moves the mouse / types) at a time, even when multiple Agent Tasks are running concurrently. Agents can plan and reason in parallel, but physical actions are sequential.
-_Avoid_: mutex, lock, semaphore
 
 ## Architecture
 
-**Realtime Pipeline (Primary)**:
-Microphone `getUserMedia` → WebRTC peer connection (renderer) → OpenAI Realtime API (`gpt-realtime-2` with reasoning) → native WebRTC audio playback. The `gpt-realtime-2` model handles speech understanding, internal reasoning (configurable effort: low/medium/high), function calling, and audio generation in a single pass. Tool calls are routed through the Realtime Tool Bridge to existing Bud tools. All tools execute asynchronously; results are injected back into the Realtime Session for natural follow-up speech. Echo prevention uses browser AEC + Realtime interruption events. Semantic VAD detects speech end for natural turn-taking.
+**Voice Loop**:
+Microphone `getUserMedia` (renderer) → audio chunks streamed to main process → Cartesia STT WebSocket → final transcript → Orchestrator (`OrchestratorAgent`) reasons + calls tools → streams text response → Cartesia TTS WebSocket plays audio back. Interruption: when STT detects speech during TTS playback, playback is cancelled and the new utterance takes over.
 
-**Legacy Pipeline (Fallback)**:
-Push-to-Talk → AudioRecorder → ffmpeg WebM→WAV → STT → executeChatCompletion() → Tool Calls → GPT response → TTS → Playback. Preserved as silent fallback when the Realtime WebRTC connection fails after 3 reconnection attempts. Activated automatically without user intervention.
+**Excalidraw Embedding**:
+The official `@excalidraw/excalidraw` React component is bundled by Vite (`vite.canvas.config.ts`) into static assets loaded by a dedicated BrowserWindow. A preload script (`canvasPreload.ts`) exposes a narrow, validated IPC API; the main-process `ExcalidrawController` calls through it to read scene state and apply mutations. Fonts and assets are self-hosted via `window.EXCALIDRAW_ASSET_PATH` — no CDN dependency.
 
-**Echo Prevention**:
-Browser-level acoustic echo cancellation (echoCancellation: true in getUserMedia) combined with Realtime interruption events. When the user speaks during Bud's response, the Realtime Session fires a speech_started event, Bud stops playback immediately, and processes the new utterance. The microphone is never muted during playback.
+**Tool Execution**:
+All four tools implement a common async executor interface. The Orchestrator calls them via `ToolExecutor`; results pass through `ToolResultEnricher` (a pure normalizer — no image processing) before returning to the model. Spawn Agent workers run their own `OrchestratorAgent` loop with the reduced toolset and report progress over the worker event bus.
 
-**Reconnection Strategy**:
-Auto-reconnect with exponential backoff (1s, 2s, 4s) for transient WebRTC failures. After 3 failed attempts, silently falls back to the Legacy Pipeline. Visual indicator on the Floating Pill shows fallback state (yellow border). Auto-switches back to Realtime when the connection is restored.
+**Cross-Platform**:
+Electron renderer + main process run identically on Windows, macOS, and Linux. The only platform-specific bits are the global hotkey default (Ctrl vs Cmd), tray icon format, and native module rebuild (`better-sqlite3`) handled by `electron-builder install-app-deps` on `postinstall`. No platform-specific input automation, screen capture, or overlay code remains.

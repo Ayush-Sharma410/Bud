@@ -1,4 +1,3 @@
-import { BrowserWindow, nativeImage } from 'electron';
 import { EventEmitter } from 'events';
 import { tool, jsonSchema } from 'ai';
 import { CartesiaSTTSession } from './CartesiaSTTSession';
@@ -14,13 +13,18 @@ import {
   ORCHESTRATOR_SYSTEM_PROMPT,
 } from '../orchestrator';
 
+/**
+ * Decouples the voice manager from any specific BrowserWindow. The main
+ * process implements this to route voice state + events to the pill/panel.
+ */
+export interface UISink {
+  sendState(state: CartesiaVoiceState): void;
+  sendToUI(channel: string, data: any): void;
+}
+
 export interface CartesiaRealtimeVoiceManagerOptions {
   config: Partial<CartesiaConfig>;
-  overlayManager: {
-    sendToOverlay: (channel: string, data: any) => void;
-    getWindow: () => BrowserWindow | null;
-  };
-  panelWindow: () => BrowserWindow | null;
+  uiSink: UISink;
   onFallbackTriggered?: (reason: string) => void;
   systemPrompt?: string;
 }
@@ -29,8 +33,7 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
   private stt: CartesiaSTTSession;
   private tts: CartesiaTTSSession;
   private toolBridge: RealtimeToolBridge;
-  private overlayManager: CartesiaRealtimeVoiceManagerOptions['overlayManager'];
-  private panelWindow: () => BrowserWindow | null;
+  private uiSink: UISink;
   private onFallbackTriggered?: (reason: string) => void;
   private systemPrompt: string;
 
@@ -57,8 +60,7 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     this.stt = new CartesiaSTTSession(this.config);
     this.tts = new CartesiaTTSSession(this.config);
     this.toolBridge = new RealtimeToolBridge();
-    this.overlayManager = options.overlayManager;
-    this.panelWindow = options.panelWindow;
+    this.uiSink = options.uiSink;
     this.onFallbackTriggered = options.onFallbackTriggered;
 
     this.orchestrator = new OrchestratorAgent({
@@ -97,12 +99,7 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
 
     bus.on('toolResult', ({ id, success, result }) => {
       this.pendingToolCalls = Math.max(0, this.pendingToolCalls - 1);
-      const stripped = this.stripImageData(result);
-      this.emitToUI('realtime-tool-result', {
-        id,
-        success,
-        result: stripped,
-      });
+      this.emitToUI('realtime-tool-result', { id, success, result });
       // If all tools finished but the orchestrator is still composing its final
       // answer, we are back to thinking. If it already spoke, the next tts event
       // will flip us to responding.
@@ -251,128 +248,11 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
       tools[executor.name] = tool({
         description: executor.description,
         inputSchema: jsonSchema(executor.parameters),
-        execute: async (args: any) => {
-          const result = await executor.execute(args);
-
-          // Normalize image payloads for Vercel AI SDK multi-modal tool results.
-          const normalized = this.normalizeToolResult(result);
-
-          // Keep the original result for the orchestrator history; images are
-          // included inside normalized content arrays.
-          return normalized;
-        },
+        execute: async (args: any) => executor.execute(args),
       });
     }
 
     return tools;
-  }
-
-  private normalizeToolResult(result: any): any {
-    if (!result || typeof result !== 'object') return result;
-
-    // If the tool already returned Vercel-compatible content parts, pass through.
-    if (Array.isArray(result)) {
-      return result.map((item) => this.normalizeToolResult(item));
-    }
-
-    // Handle { content: [...] } shape used by some tools.
-    if (Array.isArray(result.content)) {
-      return {
-        ...result,
-        content: result.content.map((item: any) => {
-          if (item?.type === 'image' && item.data) {
-            const resized = this.resizeBase64Image(item.data, item.mimeType || 'image/jpeg');
-            return {
-              type: 'image',
-              image: `data:${item.mimeType || 'image/jpeg'};base64,${resized}`,
-            };
-          }
-          if (item?.type === 'image' && item.image) {
-            const match = item.image.match(/^data:([^;]+);base64,(.+)$/);
-            if (match) {
-              const resized = this.resizeBase64Image(match[2], match[1]);
-              return { type: 'image', image: `data:${match[1]};base64,${resized}` };
-            }
-            return item;
-          }
-          if (item?.type === 'text' && item.text) {
-            return { type: 'text', text: item.text };
-          }
-          return item;
-        }),
-      };
-    }
-
-    // Handle captureScreen's { screens: [{ imageBase64, width, height, ... }] } shape.
-    // Preserves width/height metadata (original physical pixels) so the model can
-    // return annotation coordinates in original screenshot pixel space, while the
-    // image itself is downscaled for context-window efficiency.
-    if (Array.isArray(result.screens)) {
-      return {
-        ...result,
-        screens: result.screens.map((screen: any) => {
-          if (screen?.imageBase64) {
-            const resized = this.resizeBase64Image(screen.imageBase64, 'image/jpeg');
-            return { ...screen, imageBase64: undefined, content: [
-              { type: 'text', text: `Screen ${screen.screenIndex}: ${screen.width}x${screen.height} (coordinates in original ${screen.width}x${screen.height} pixel space)` },
-              { type: 'image', image: `data:image/jpeg;base64,${resized}` },
-            ] };
-          }
-          return screen;
-        }),
-      };
-    }
-
-    // Handle top-level image fields.
-    if (result.imageBase64 || result.image?.data) {
-      const data = result.imageBase64 || result.image?.data;
-      const mimeType = result.mimeType || result.image?.mimeType || 'image/jpeg';
-      const resized = this.resizeBase64Image(data, mimeType);
-      return {
-        ...result,
-        content: [
-          { type: 'text', text: result.detail || 'Image captured.' },
-          { type: 'image', image: `data:${mimeType};base64,${resized}` },
-        ],
-      };
-    }
-
-    return result;
-  }
-
-  private resizeBase64Image(base64Data: string, _mimeType: string, maxDim = 1280, quality = 60): string {
-    try {
-      const img = nativeImage.createFromBuffer(Buffer.from(base64Data, 'base64'));
-      if (img.isEmpty()) return base64Data;
-
-      const size = img.getSize();
-      const scale = Math.min(1, maxDim / Math.max(size.width, size.height));
-      const resized = scale < 1
-        ? img.resize({ width: Math.round(size.width * scale), height: Math.round(size.height * scale) })
-        : img;
-
-      return resized.toJPEG(quality).toString('base64');
-    } catch (err) {
-      console.error('⚠️ Failed to resize tool image:', err);
-      return base64Data;
-    }
-  }
-
-  private stripImageData(result: any): any {
-    if (!result || typeof result !== 'object') return result;
-    if (Array.isArray(result)) return result.map(item => this.stripImageData(item));
-
-    const stripped = { ...result };
-    for (const key of Object.keys(stripped)) {
-      if (key === 'imageBase64' || key === 'image' || key === 'data') {
-        if (typeof stripped[key] === 'string' && stripped[key].length > 1000) {
-          stripped[key] = '[image data sent separately]';
-        }
-      } else if (typeof stripped[key] === 'object' && stripped[key] !== null) {
-        stripped[key] = this.stripImageData(stripped[key]);
-      }
-    }
-    return stripped;
   }
 
   private handleInterruption() {
@@ -407,22 +287,16 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     if (this.voiceState === state) return;
     this.voiceState = state;
     console.log(`🎙️ Cartesia voice state: ${state}`);
-    this.emitToUI('state-change', state);
-    this.overlayManager.sendToOverlay('state-change', state);
+    this.uiSink.sendState(state);
+    this.uiSink.sendToUI('state-change', state);
   }
 
   private emitToUI(channel: string, data: any) {
-    const panel = this.panelWindow();
-    if (panel && !panel.isDestroyed()) {
-      panel.webContents.send(channel, data);
-    }
+    this.uiSink.sendToUI(channel, data);
   }
 
   private emitToRenderer(channel: string, data: any) {
-    const panel = this.panelWindow();
-    if (panel && !panel.isDestroyed()) {
-      panel.webContents.send(channel, data);
-    }
+    this.uiSink.sendToUI(channel, data);
   }
 
   private triggerFallback(reason: string) {
@@ -494,19 +368,10 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     this.stt.sendAudioChunk(buffer);
   }
 
-  injectContext(text: string, images?: Array<{ base64: string; mediaType: string }>) {
+  injectContext(text: string) {
+    if (!text) return;
     const history = this.orchestrator.getHistory();
-    if (text) {
-      history.push({ role: 'user', content: text });
-    }
-    if (images) {
-      for (const img of images) {
-        history.push({
-          role: 'user',
-          content: [{ type: 'image', image: `data:${img.mediaType};base64,${img.base64}` }],
-        });
-      }
-    }
+    history.push({ role: 'user', content: text });
     this.orchestrator.setHistory(history);
   }
 

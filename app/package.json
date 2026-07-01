@@ -1,14 +1,16 @@
 {
   "name": "bud",
   "version": "0.1.0",
-  "description": "Bud — Windows desktop voice companion",
+  "description": "Bud — AI-native Excalidraw voice copilot (cross-platform)",
   "main": "dist/main/main.js",
   "scripts": {
     "canvas:build": "vite build --config vite.canvas.config.ts",
     "build": "tsc && npm run canvas:build",
+    "typecheck": "tsc --noEmit",
     "start": "npm run build && electron .",
     "dev": "tsc && npm run canvas:build && electron .",
-    "package": "npm run build && electron-builder"
+    "package": "npm run build && electron-builder",
+    "postinstall": "electron-builder install-app-deps"
   },
   "author": "Ayush",
   "license": "MIT",
@@ -25,34 +27,39 @@
     "vite": "^8.1.0"
   },
   "dependencies": {
-    "@ai-sdk/groq": "^3.0.42",
     "@ai-sdk/openai": "^3.0.69",
     "@ai-sdk/openai-compatible": "^2.0.51",
     "@excalidraw/excalidraw": "^0.18.1",
-    "@ffmpeg-installer/ffmpeg": "^1.1.0",
-    "@nut-tree-fork/nut-js": "^4.2.6",
     "@types/ws": "^8.18.1",
     "ai": "^6.0.199",
-    "assemblyai": "^4.34.4",
     "better-sqlite3": "^12.10.0",
-    "mammoth": "^1.12.0",
-    "ollama-ai-provider-v2": "^3.6.0",
     "openai": "^6.42.0",
-    "pdf-parse": "^2.4.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "screenshot-desktop": "^1.15.0",
-    "sharp": "^0.35.2",
-    "uiohook-napi": "^1.5.4",
     "ws": "^8.21.0",
     "zod": "^4.4.3"
   },
   "build": {
     "appId": "com.bud.desktop",
     "productName": "Bud",
+    "files": [
+      "dist/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.graphics-design"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Graphics"
     },
     "directories": {
       "output": "release"

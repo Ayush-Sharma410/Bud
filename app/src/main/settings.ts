@@ -1,13 +1,12 @@
 /**
- * Bud — Settings Manager
+ * Bud — Settings Manager (Excalidraw Voice Copilot)
  *
- * Handles persistent settings storage (JSON file in app data directory).
- * Saves provider choice, model configuration, custom endpoint URLs, and UI settings.
+ * Persistent JSON settings in the app data directory. Cross-platform.
+ * Owns model name, hotkeys, and the Excalidraw canvas config.
  */
 import { app } from 'electron';
 import path from 'path';
 import fs from 'fs';
-import { ProviderConfig, DEFAULT_PROVIDER_CONFIG } from './providers/types';
 
 export type CanvasTheme = 'light' | 'dark' | 'auto';
 
@@ -34,8 +33,12 @@ export interface ExcalidrawSettings {
   };
 }
 
-export interface AppSettings extends ProviderConfig {
-  cursorEnabled: boolean;
+export interface AppSettings {
+  /** Chat/voice LLM model name (env OPENAI_MODEL overrides). */
+  model: string;
+  /** Accelerator that toggles mute. */
+  muteHotkey: string;
+  /** Excalidraw canvas config. */
   excalidraw: ExcalidrawSettings;
 }
 
@@ -66,34 +69,32 @@ export class SettingsManager {
     this.currentSettings = this.loadSettings();
   }
 
+  private defaults(): AppSettings {
+    return {
+      model: process.env.OPENAI_MODEL || 'gpt-5.1',
+      muteHotkey: 'CommandOrControl+Alt+M',
+      excalidraw: DEFAULT_EXCALIDRAW_SETTINGS,
+    };
+  }
+
   private loadSettings(): AppSettings {
+    const defaults = this.defaults();
     try {
       if (fs.existsSync(this.filePath)) {
-        const data = fs.readFileSync(this.filePath, 'utf-8');
-        const parsed = JSON.parse(data);
+        const parsed = JSON.parse(fs.readFileSync(this.filePath, 'utf-8'));
         console.log('⚙️ Settings loaded from:', this.filePath);
         return {
-          ...DEFAULT_PROVIDER_CONFIG,
-          cursorEnabled: true,
+          ...defaults,
           ...parsed,
-          // Nested merges to ensure sub-objects are not overridden entirely
-          modal: {
-            ...DEFAULT_PROVIDER_CONFIG.modal,
-            ...(parsed.modal || {}),
-          },
-          local: {
-            ...DEFAULT_PROVIDER_CONFIG.local,
-            ...(parsed.local || {}),
-          },
           excalidraw: {
-            ...DEFAULT_EXCALIDRAW_SETTINGS,
+            ...defaults.excalidraw,
             ...(parsed.excalidraw || {}),
             safetyThresholds: {
-              ...DEFAULT_EXCALIDRAW_SETTINGS.safetyThresholds,
+              ...defaults.excalidraw.safetyThresholds,
               ...(parsed.excalidraw?.safetyThresholds || {}),
             },
             snapshotRing: {
-              ...DEFAULT_EXCALIDRAW_SETTINGS.snapshotRing,
+              ...defaults.excalidraw.snapshotRing,
               ...(parsed.excalidraw?.snapshotRing || {}),
             },
           },
@@ -102,11 +103,7 @@ export class SettingsManager {
     } catch (err) {
       console.error('⚠️ Failed to load settings, falling back to defaults:', err);
     }
-    return {
-      ...DEFAULT_PROVIDER_CONFIG,
-      cursorEnabled: true,
-      excalidraw: DEFAULT_EXCALIDRAW_SETTINGS,
-    };
+    return defaults;
   }
 
   getSettings(): AppSettings {
@@ -117,14 +114,6 @@ export class SettingsManager {
     this.currentSettings = {
       ...this.currentSettings,
       ...settings,
-      modal: {
-        ...this.currentSettings.modal,
-        ...(settings.modal || {}),
-      },
-      local: {
-        ...this.currentSettings.local,
-        ...(settings.local || {}),
-      },
       excalidraw: {
         ...this.currentSettings.excalidraw,
         ...(settings.excalidraw || {}),

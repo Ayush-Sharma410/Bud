@@ -6,18 +6,17 @@ import fs from 'fs';
 import { app, BrowserWindow } from 'electron';
 import { bus } from '../bus';
 
-export const createSpawnWorkerTool = (getPanelWindow: () => BrowserWindow | null) => tool({
-  description: `**Spawn Worker Agent** — Run long-duration or asynchronous tasks in the background.
+export const createSpawnAgentTool = (getPanelWindow: () => BrowserWindow | null) => tool({
+  description: `**Spawn Agent** — Run long-duration or asynchronous tasks in the background.
 
 Good for:
-- Competitor / market research
-- Codebase review or documentation generation
-- Monitoring logs, deployments, or emails
-- Organizing files or building reports
+- Research / market analysis
+- Building reports or summaries
+- Organizing information
 
-The worker uses the OpenAI SDK and can call most other tools (windows, apps, troubleshooting, memory, searchWeb) but **cannot** spawn another worker or use Computer Use.
+The worker uses the OpenAI SDK and can call \`searchWeb\` and \`memory\` only. It **cannot** spawn another agent or touch the Excalidraw canvas.
 
-Returns immediately with a taskId — the task runs in the background.`,
+Returns immediately with a taskId — the task runs in the background and reports progress/completion back to the panel.`,
   inputSchema: jsonSchema<{
     task: string;
     toolsAllowed?: string[];
@@ -30,31 +29,28 @@ Returns immediately with a taskId — the task runs in the background.`,
       toolsAllowed: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Optional list of tools the worker is allowed to use (defaults to all except spawnWorker and computerUse)'
+        description: 'Optional list of tools the worker is allowed to use (defaults to searchWeb + memory)',
       },
       timeoutMinutes: { type: 'number', description: 'Maximum runtime before auto-termination (default: 30)' },
-      reason: { type: 'string', description: 'Why a background worker is needed' },
+      reason: { type: 'string', description: 'Why a background agent is needed' },
     },
     required: ['task'],
   }),
   execute: async ({ task, toolsAllowed, timeoutMinutes = 30, reason }) => {
     const taskId = randomUUID();
-    console.log(`🛠️ Tool: spawnWorker — Task: "${task.substring(0, 80)}..." | Timeout: ${timeoutMinutes}m | Reason: ${reason || 'N/A'}`);
+    console.log(`🛠️ Tool: spawnAgent — Task: "${task.substring(0, 80)}..." | Timeout: ${timeoutMinutes}m | Reason: ${reason || 'N/A'}`);
 
     bus.post(taskId, 'worker', { task, toolsAllowed, timeoutMinutes, reason });
 
-    // Provide a visible, user-owned workspace so files created by the worker
-    // do not vanish into the build directory.
     const workerOutputDir = path.join(process.env.BUD_USER_DATA || app.getPath('userData'), 'worker-output');
     fs.mkdirSync(workerOutputDir, { recursive: true });
 
-    // Resolve path to compiled worker
     const workerPath = path.join(__dirname, '..', '..', 'worker', 'worker.js');
     const child = fork(workerPath, [taskId], {
       env: {
         ...process.env,
         WORKER_TASK: task,
-        WORKER_TOOLS_ALLOWED: JSON.stringify(toolsAllowed || ['windows', 'apps', 'troubleshooting', 'memory', 'searchWeb', 'notify']),
+        WORKER_TOOLS_ALLOWED: JSON.stringify(toolsAllowed || ['searchWeb', 'memory']),
         WORKER_TIMEOUT_MINUTES: String(timeoutMinutes),
         WORKER_OUTPUT_DIR: workerOutputDir,
         OPENAI_BASE_URL: process.env.OPENAI_BASE_URL || '',
@@ -63,7 +59,6 @@ Returns immediately with a taskId — the task runs in the background.`,
       cwd: workerOutputDir,
     });
 
-    // Auto-kill after timeout
     const killTimer = setTimeout(() => {
       if (!child.killed) {
         console.log(`⏰ Worker ${taskId} timed out after ${timeoutMinutes}m — killing`);
@@ -79,7 +74,7 @@ Returns immediately with a taskId — the task runs in the background.`,
       getPanelWindow()?.webContents.send('agent-task-updated', bus.get(taskId));
     });
 
-    console.log(`Spawned worker for task ${taskId}`);
+    console.log(`Spawned agent for task ${taskId}`);
     getPanelWindow()?.webContents.send('agent-task-updated', bus.get(taskId));
 
     return {
@@ -87,7 +82,7 @@ Returns immediately with a taskId — the task runs in the background.`,
       taskId,
       task: task.substring(0, 200),
       timeoutMinutes,
-      message: `Background Agent Task started. I'll let you know when it's done.`,
+      message: `Background agent started. I'll let you know when it's done.`,
     };
   }
 });
