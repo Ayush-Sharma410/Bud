@@ -2,14 +2,15 @@
  * Bud — Orchestrator Agent
  *
  * Handles every voice/chat request with a two-model split:
- *  - Preamble (gpt-4.1-mini): fires a short engagement ack the instant a
+ *  - Preamble (gpt-5-nano): fires a short engagement ack the instant a
  *    request arrives, so the user knows Bud is already moving.
  *  - Complex (gpt-5.1): handles tool calls and multi-step workflows, freed
  *    from having to produce the acknowledgment first.
  *
- * Both calls run concurrently with a shared AbortSignal. The preamble ack
- * is suppressed if the complex stream already emitted TTS (e.g. a direct
- * answer that needs no tool), avoiding double-speak.
+ * The preamble runs first; its ACK (if any) is spoken while the complex
+ * model works. The complex model's entire text output is streamed directly
+ * to the UI and to TTS — no marker parsing. Both share an AbortSignal so an
+ * interruption cancels whichever phase is in flight.
  */
 
 import { streamText, stepCountIs } from 'ai';
@@ -19,7 +20,6 @@ import {
   getDefaultPreambleModelName,
 } from '../llmProvider';
 import { OrchestratorEventBus } from './OrchestratorEventBus';
-import { TTSMarkerParser } from './TTSMarkerParser';
 import { enrichToolResult } from './ToolResultEnricher';
 import { executeWithRetry } from './RetryToolExecutor';
 import { PREAMBLE_SYSTEM_PROMPT } from './orchestratorPrompt';
@@ -31,7 +31,7 @@ export interface OrchestratorAgentOptions {
   system?: string;
   /** Complex model name (tool calls + workflows). Defaults via env or gpt-5.1. */
   model?: string;
-  /** Preamble model name (engagement ack). Defaults via env or gpt-4.1-mini. */
+  /** Preamble model name (engagement ack). Defaults via env or gpt-5-nano. */
   preambleModel?: string;
   /** System prompt for the preamble model. Defaults to PREAMBLE_SYSTEM_PROMPT. */
   preambleSystem?: string;
@@ -103,7 +103,6 @@ export class OrchestratorAgent {
     this.history.push({ role: 'user', content: options.request });
     this.trimHistory();
 
-    const ttsParser = new TTSMarkerParser();
     const toolCallMap = new Map<string, string>();
     const signal = options.signal;
 
@@ -218,31 +217,14 @@ export class OrchestratorAgent {
         },
       });
 
-      let complexHasSpoken = false;
       for await (const chunk of result.textStream) {
-        const parsedChunks = ttsParser.push(chunk);
-        for (const pc of parsedChunks) {
-          if (pc.text) this.eventBus.emit('text', pc.text);
-          if (pc.tts) {
-            complexHasSpoken = true;
-            this.eventBus.emit('tts', pc.tts);
-          }
-        }
+        // Every text token is streamed to the UI and spoken via TTS directly.
+        this.eventBus.emit('text', chunk);
+        this.eventBus.emit('tts', chunk);
       }
 
       const finalText = await result.text;
       const response = await result.response;
-
-      const leftover = ttsParser.flush();
-      if (leftover) {
-        this.eventBus.emit('text', leftover);
-      }
-
-      // Complex call may have written a final answer outside <TTS> tags.
-      // Don't double-speak if an ACK was already emitted.
-      if (!complexHasSpoken && decision.kind !== 'ack' && finalText) {
-        this.eventBus.emit('tts', finalText);
-      }
 
       if (response.messages && response.messages.length > 0) {
         this.history.push(...(response.messages as any[]));

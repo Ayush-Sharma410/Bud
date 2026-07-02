@@ -8,7 +8,12 @@
   const BYTES_PER_SAMPLE = 2; // s16le
 
   let micStream = null;
-  let audioCtx = null;
+  // Separate AudioContexts so stopping mic capture never kills TTS playback.
+  // captureCtx drives the mic worklet; playbackCtx schedules TTS audio. Sharing
+  // one context meant stopCapture()'s close() also cut off any response that
+  // was mid-playback (releasing Ctrl+Alt / pressing Escape would silence Bud).
+  let captureCtx = null;
+  let playbackCtx = null;
   let workletNode = null;
   let mediaSource = null;
   let isCapturing = false;
@@ -65,17 +70,24 @@
     await ensureMic();
 
     try {
-      audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
-      await audioCtx.audioWorklet.addModule('realtime-worklet.js');
+      captureCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      // AudioContexts can start suspended (esp. when created without a direct
+      // user gesture in the focused window — e.g. capture triggered by a global
+      // hotkey while another app had focus). Resume so the worklet actually
+      // captures audio regardless of which window is focused.
+      if (captureCtx.state === 'suspended') {
+        await captureCtx.resume().catch(() => {});
+      }
+      await captureCtx.audioWorklet.addModule('realtime-worklet.js');
 
-      workletNode = new AudioWorkletNode(audioCtx, 'realtime-pcm-processor');
-      mediaSource = audioCtx.createMediaStreamSource(micStream);
+      workletNode = new AudioWorkletNode(captureCtx, 'realtime-pcm-processor');
+      mediaSource = captureCtx.createMediaStreamSource(micStream);
       mediaSource.connect(workletNode);
 
       // Keep the worklet in the audio graph without playing it back to speakers.
-      const silentGain = audioCtx.createGain();
+      const silentGain = captureCtx.createGain();
       silentGain.gain.value = 0;
-      silentGain.connect(audioCtx.destination);
+      silentGain.connect(captureCtx.destination);
       workletNode.connect(silentGain);
 
       let chunkBuffer = new Int16Array(0);
@@ -114,9 +126,11 @@
       mediaSource.disconnect();
       mediaSource = null;
     }
-    if (audioCtx) {
-      audioCtx.close();
-      audioCtx = null;
+    // Close ONLY the capture context. playbackCtx must stay alive so an
+    // in-progress TTS response keeps playing after the mic is released.
+    if (captureCtx) {
+      captureCtx.close();
+      captureCtx = null;
     }
 
     // Fully release the mic device so the OS indicator turns off at idle.
@@ -185,13 +199,13 @@
       nextStartTime = 0;
     }
 
-    if (!audioCtx) {
-      audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+    if (!playbackCtx) {
+      playbackCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
     }
     // AudioContexts can start suspended (esp. when created without a user
     // gesture). Make sure it's running before scheduling audio.
-    if (audioCtx.state === 'suspended') {
-      audioCtx.resume().catch(() => {});
+    if (playbackCtx.state === 'suspended') {
+      playbackCtx.resume().catch(() => {});
     }
 
     const samples = base64ToInt16(base64Audio);
@@ -204,17 +218,17 @@
     const frames = pendingChunks.slice(0, frameCount);
     pendingChunks = pendingChunks.slice(frameCount);
 
-    const buffer = audioCtx.createBuffer(1, frames.length, SAMPLE_RATE);
+    const buffer = playbackCtx.createBuffer(1, frames.length, SAMPLE_RATE);
     const channelData = buffer.getChannelData(0);
     for (let i = 0; i < frames.length; i++) {
       channelData[i] = frames[i] / 32768;
     }
 
-    const source = audioCtx.createBufferSource();
+    const source = playbackCtx.createBufferSource();
     source.buffer = buffer;
-    source.connect(audioCtx.destination);
+    source.connect(playbackCtx.destination);
 
-    const startTime = Math.max(nextStartTime, audioCtx.currentTime);
+    const startTime = Math.max(nextStartTime, playbackCtx.currentTime);
     source.start(startTime);
     nextStartTime = startTime + buffer.duration;
 

@@ -10,7 +10,7 @@
  * - The four tools: searchWeb, excalidraw, memory, spawnAgent
  */
 import '../logger';
-import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, screen, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -130,6 +130,17 @@ app.whenReady().then(async () => {
   process.env.BUD_USER_DATA = app.getPath('userData');
   memoryDir = path.join(app.getPath('userData'), 'memory');
   console.log('Bud starting...');
+
+  // Auto-grant media (microphone) access so the panel renderer can capture
+  // audio even when it doesn't have window focus — Bud is driven by global
+  // hotkeys, so the user may trigger PTT / always-on while another app is
+  // focused. Without this, getUserMedia can prompt or silently fail off-focus.
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(permission === 'media');
+  });
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => {
+    return permission === 'media';
+  });
 
   // 1. System tray
   trayManager = new TrayManager({
@@ -301,8 +312,18 @@ function togglePanel() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // Keep the renderer (mic capture + TTS playback) running at full speed
+      // even when the panel doesn't have focus. Without this, Chromium throttles
+      // background AudioContexts, so global-hotkey-triggered capture stalls
+      // while another app is focused — making the hotkeys feel non-global.
+      backgroundThrottling: false,
     },
   });
+
+  // 'screen-saver' is the highest always-on-top level on Windows/macOS/Linux,
+  // keeping the pill above other always-on-top windows so it's visible on top
+  // of every application.
+  panelWindow.setAlwaysOnTop(true, 'screen-saver');
 
   panelWindow.loadFile(
     path.join(__dirname, '..', '..', 'src', 'renderer', 'panel', 'index.html')

@@ -202,7 +202,11 @@ export class VoiceInputManager {
     if (this.mode === 'idle') return;
     this.pttActive = false;
     this.setMode('idle');
-    this.options.onInterrupt();
+    // Escape exits the listening mode ONLY. It must NOT interrupt an in-progress
+    // response (speaking / processing) — that is the voice-interruption path's
+    // job (STT detects speech during TTS and the voice manager cancels playback).
+    // Calling onInterrupt here used to cut Bud off mid-sentence when the user
+    // just wanted to stop the mic.
     this.options.onExitListening();
   }
 

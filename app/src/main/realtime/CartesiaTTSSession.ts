@@ -195,7 +195,9 @@ export class CartesiaTTSSession extends EventEmitter {
           break;
         case 'error':
           console.error('⚠️ Cartesia TTS server error:', event.message);
-          this.emit('error', new Error(event.message));
+          // Emit the raw event (carries context_id) so consumers can ignore
+          // errors for contexts they intentionally cancelled.
+          this.emit('error', event);
           break;
         default:
           break;

@@ -41,8 +41,23 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
   private voiceState: CartesiaVoiceState = 'idle';
   private isListening = false;
   private isResponseActive = false;
+  // True while TTS audio is being delivered/played. The orchestrator finishes
+  // ('done') before the audio finishes playing, so isResponseActive alone can't
+  // gate interruption — without this flag, speaking during playback wouldn't
+  // cancel playback because turn.start saw isResponseActive=false. Kept true
+  // from the first tts event until audio.done/flush.done for the context.
+  private isSpeaking = false;
   private pendingToolCalls = 0;
   private ttsContextId: string | null = null;
+  // Whether any TTS text was sent on the current context. The final flush is
+  // only valid when there is buffered content to flush; flushing an empty
+  // context triggers Cartesia's "No valid transcripts passed" error.
+  private ttsSentThisTurn = false;
+  // Timestamp of the last interruption. Used to suppress the expected TTS
+  // "context ID does not exist" error that Cartesia returns when a send lands
+  // on a context we just cancelled — the error often arrives without a
+  // context_id, so the cancelled-set check alone isn't enough.
+  private lastInterruptedAt = 0;
   private responseTextBuffer = '';
   private reconnectFallbackTriggered = false;
   private orchestrator: OrchestratorAgent;
@@ -83,8 +98,15 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
 
     bus.on('tts', (text) => {
       if (!this.ttsContextId) return;
+      // Stream with continue=true so the context stays open across the ACK and
+      // the complex model's answer. Sending continue=false after the ACK would
+      // finalize the context and make every later send (and the final flush)
+      // fail with "No valid transcripts passed". The context is flushed once,
+      // on 'done'.
+      this.ttsSentThisTurn = true;
+      this.isSpeaking = true;
       this.setVoiceState('responding');
-      this.tts.sendText(text, this.ttsContextId, false);
+      this.tts.sendText(text, this.ttsContextId, true);
     });
 
     bus.on('toolCall', ({ id, name, input }) => {
@@ -115,12 +137,23 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
 
     bus.on('done', ({ finalText }) => {
       this.isResponseActive = false;
-      // Only flush if we still own a live TTS context. After an interruption
-      // ttsContextId is null and the context was cancelled — flushing null
-      // would send an invalid request to Cartesia.
-      if (this.ttsContextId) {
+      // Only flush if we still own a live TTS context AND we actually streamed
+      // text onto it. After an interruption ttsContextId is null and the
+      // context was cancelled — flushing null would send an invalid request.
+      // Flushing a context that received no transcript likewise errors.
+      if (this.ttsContextId && this.ttsSentThisTurn) {
         this.tts.flushContext(this.ttsContextId);
+        // isSpeaking stays true: audio.done / flush.done will clear it and flip
+        // the pill to idle once playback actually finishes. This keeps voice
+        // interruption able to cancel playback during the post-done buffer.
+      } else {
+        // No TTS this turn — nothing will emit audio.done, so settle now.
+        this.isSpeaking = false;
+        if (this.pendingToolCalls === 0) {
+          this.setVoiceState('idle');
+        }
       }
+      this.ttsSentThisTurn = false;
       this.emitToUI('realtime-response-text', finalText);
       this.emitToUI('realtime-response-done', {});
     });
@@ -146,7 +179,13 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
       this.emit('speech.started');
       this.emitToUI('realtime-turn-start', {});
 
-      if (this.isResponseActive || this.pendingToolCalls > 0) {
+      // Only interrupt if Bud is actually producing output the user can hear
+      // or is mid-tool. We deliberately do NOT interrupt on isResponseActive
+      // alone: right after turn.end the orchestrator may have just started
+      // (preamble running, no audio yet, no tools). A stray turn.start ~400ms
+      // later (continuation / echo / noise) would otherwise abort that fresh
+      // response before it ever speaks, losing the user's first utterance.
+      if (this.isSpeaking || this.pendingToolCalls > 0) {
         console.log('🎤 User interrupted — stopping playback');
         this.handleInterruption();
       }
@@ -200,14 +239,42 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
       if (event?.contextId && this.cancelledContextIds.has(event.contextId)) {
         return;
       }
+      this.isSpeaking = false;
       if (!this.isResponseActive && this.pendingToolCalls === 0) {
         this.setVoiceState('idle');
         this.emitToUI('realtime-response-done', {});
       }
     });
 
-    this.tts.on('error', (err: Error) => {
-      console.error('⚠️ Cartesia TTS error:', err.message);
+    // Cartesia may signal the end of a flushed context via flush_done instead
+    // of (or in addition to) a chunk with done=true. Treat it as the same
+    // "playback finished" signal so the pill doesn't get stuck in responding.
+    this.tts.on('flush.done', (event: { context_id?: string }) => {
+      if (event?.context_id && this.cancelledContextIds.has(event.context_id)) {
+        return;
+      }
+      this.isSpeaking = false;
+      if (!this.isResponseActive && this.pendingToolCalls === 0) {
+        this.setVoiceState('idle');
+        this.emitToUI('realtime-response-done', {});
+      }
+    });
+
+    this.tts.on('error', (event: { context_id?: string; message?: string } | Error) => {
+      // Cartesia returns "context ID does not exist or may have already been
+      // cancelled" when a send/flush lands on a context we just cancelled via
+      // interruption. That's expected — drop it silently. The error frequently
+      // arrives without a context_id, so also suppress any TTS error within a
+      // short window after an interruption.
+      const ctxId = (event as any)?.context_id;
+      if (ctxId && this.cancelledContextIds.has(ctxId)) {
+        return;
+      }
+      if (Date.now() - this.lastInterruptedAt < 1500) {
+        return;
+      }
+      const message = (event as any)?.message ?? String(event);
+      console.error('⚠️ Cartesia TTS error:', message);
     });
 
     this.tts.on('reconnectFailed', () => {
@@ -229,7 +296,9 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     }
 
     this.isResponseActive = true;
+    this.isSpeaking = false;
     this.responseTextBuffer = '';
+    this.ttsSentThisTurn = false;
     this.cancelledContextIds.clear();
     this.ttsContextId = this.tts.startContext();
     this.turnAbortController = new AbortController();
@@ -264,7 +333,9 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
 
   private handleInterruption() {
     this.isResponseActive = false;
+    this.isSpeaking = false;
     this.responseTextBuffer = '';
+    this.lastInterruptedAt = Date.now();
 
     if (this.turnAbortController) {
       this.turnAbortController.abort();
@@ -286,6 +357,7 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
 
   private speakError(text: string) {
     this.ttsContextId = this.tts.startContext();
+    this.isSpeaking = true;
     this.tts.sendText(text, this.ttsContextId, false);
     this.emitToUI('realtime-response-text', text);
   }
@@ -360,7 +432,10 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
       }
     } else {
       this.emitToRenderer('cartesia-stop-capture', {});
-      if (!this.isResponseActive && this.pendingToolCalls === 0) {
+      // Don't flip to idle if Bud is still speaking or thinking — releasing the
+      // mic (PTT) or exiting always-on (Escape) must only stop capture, not
+      // disturb an in-progress response.
+      if (!this.isResponseActive && !this.isSpeaking && this.pendingToolCalls === 0) {
         this.setVoiceState('idle');
       }
     }

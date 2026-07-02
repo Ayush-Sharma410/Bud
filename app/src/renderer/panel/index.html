@@ -1018,43 +1018,11 @@
     let waveActive = false;
     let openTaskId = null;
 
-    let micStream = null;
-    let audioCtx = null;
-    let workletNode = null;
-    let realtimeActive = false;
-    let micReady = null;
-
-    async function initMic() {
-      if (micReady) return micReady;
-      micReady = (async () => {
-        try {
-          micStream = await navigator.mediaDevices.getUserMedia({
-            audio: { channelCount: 1, sampleRate: 24000, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-          });
-          console.log('Mic ready');
-        } catch (err) {
-          console.error('Mic denied:', err);
-          micReady = null;
-        }
-      })();
-      return micReady;
-    }
-
-    async function startRealtimeCapture() {
-      // Legacy AudioWorklet capture — kept as fallback
-      // WebRTC is now the primary transport
-    }
-
     function ab2b64(buf) {
       const bytes = new Uint8Array(buf);
       let bin = '';
       for (let i = 0; i < bytes.byteLength; i++) bin += String.fromCharCode(bytes[i]);
       return btoa(bin);
-    }
-
-    initMic();
-    if (window.budAPI) {
-      window.budAPI.onStartRealtimeCapture(() => startRealtimeCapture());
     }
 
     const PILL_W = 260;
@@ -1517,7 +1485,10 @@
         rtResponseEl = null;
         rtResponseBuf = '';
         rtTranscriptEl = null;
-        if (window.realtimeWebRTC) window.realtimeWebRTC.stopPlayback();
+        // Stop any in-flight TTS playback in the Cartesia renderer. (The main
+        // process also sends cartesia-tts-stop; this is a belt-and-suspenders
+        // clear of the chat buffer + playback on the interruption channel.)
+        window.cartesiaRealtime?.stopPlayback?.();
       });
 
       providerTog.addEventListener('click', () => {
@@ -1718,60 +1689,6 @@
       });
     }
   </script>
-  <script src="realtime-webrtc.js"></script>
   <script src="cartesia-realtime.js"></script>
-  <script>
-    (function initWebRTC() {
-      if (!window.realtimeWebRTC || !window.budAPI) return;
-
-      const rtc = window.realtimeWebRTC;
-
-      rtc.on('server-event', (event) => {
-        window.budAPI.sendWebRTCEvent(event);
-      });
-
-      rtc.on('connected', () => {
-        window.budAPI.sendWebRTCConnected();
-      });
-
-      rtc.on('datachannel.open', () => {
-        console.log('[Panel] Data channel open — notifying main process');
-        window.budAPI.sendWebRTCDataChannelOpen();
-      });
-
-      rtc.on('disconnected', (reason) => {
-        window.budAPI.sendWebRTCDisconnected(reason);
-      });
-
-      rtc.on('error', (err) => {
-        window.budAPI.sendWebRTCError(err.message || String(err));
-      });
-
-      window.budAPI.onWebRTCConnect(async (config) => {
-        console.log('[Panel] WebRTC connect requested');
-        rtc.setSDPEndpoint(config.sdpEndpoint);
-        try {
-          await rtc.connect();
-        } catch (err) {
-          console.error('[Panel] WebRTC connect failed:', err);
-        }
-      });
-
-      window.budAPI.onWebRTCDisconnect(() => {
-        console.log('[Panel] WebRTC disconnect requested');
-        rtc.disconnect();
-      });
-
-      window.budAPI.onWebRTCSend((event) => {
-        rtc.send(event);
-      });
-
-      window.budAPI.onWebRTCMute((muted) => {
-        rtc.setMuted(muted);
-      });
-
-      console.log('[Panel] WebRTC IPC wired');
-    })();
-  </script>
 </body>
 </html>
