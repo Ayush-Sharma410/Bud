@@ -39,7 +39,7 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
 
   private config: CartesiaConfig;
   private voiceState: CartesiaVoiceState = 'idle';
-  private isMuted = false;
+  private isListening = false;
   private isResponseActive = false;
   private pendingToolCalls = 0;
   private ttsContextId: string | null = null;
@@ -216,6 +216,13 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
   }
 
   private async handleUserTurn(transcript: string) {
+    if (!this.isListening) {
+      // Stale turn arrived after listening ended (e.g. right after Escape or
+      // PTT release). Ignore it so we don't respond to audio we weren't meant
+      // to capture.
+      console.log('🗣️ Ignoring turn — not listening');
+      return;
+    }
     if (this.isResponseActive) {
       console.log('🗣️ Ignoring duplicate turn while response already active');
       return;
@@ -318,9 +325,11 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
 
   start() {
     console.log('🚀 Starting CartesiaRealtimeVoiceManager');
+    // Connect STT/TTS up front so mode switches have no reconnect latency.
+    // Mic capture is NOT started here — it is driven by setListening() from
+    // VoiceInputManager (idle by default).
     this.stt.connect();
     this.tts.connect();
-    this.emitToRenderer('cartesia-start-capture', {});
   }
 
   stop() {
@@ -331,27 +340,42 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
     this.setVoiceState('idle');
   }
 
-  toggleMute(): boolean {
-    this.isMuted = !this.isMuted;
-    console.log(`🎙️ Cartesia mute ${this.isMuted ? 'enabled' : 'disabled'}`);
+  /**
+   * Turn the mic on/off. Driven by VoiceInputManager (PTT hold / always-on /
+   * Escape). Emits capture start/stop to the renderer; the STT WebSocket stays
+   * connected across toggles — only the PCM flow is gated.
+   */
+  setListening(listening: boolean): void {
+    this.isListening = listening;
+    console.log(`🎙️ Listening ${listening ? 'enabled' : 'disabled'}`);
 
-    this.emitToRenderer('cartesia-mute', this.isMuted);
-
-    if (this.isMuted) {
-      this.setVoiceState('muted');
-    } else {
-      this.setVoiceState('idle');
+    if (listening) {
+      this.emitToRenderer('cartesia-start-capture', {});
       if (this.stt.getState() !== 'connected') {
         this.stt.connect();
       }
+      // Show "listening" only when idle; don't clobber an active response.
+      if (this.voiceState === 'idle') {
+        this.setVoiceState('listening');
+      }
+    } else {
+      this.emitToRenderer('cartesia-stop-capture', {});
+      if (!this.isResponseActive && this.pendingToolCalls === 0) {
+        this.setVoiceState('idle');
+      }
     }
-
-    this.emitToUI('mute-state', this.isMuted);
-    return this.isMuted;
   }
 
-  getMuted(): boolean {
-    return this.isMuted;
+  getListening(): boolean {
+    return this.isListening;
+  }
+
+  /**
+   * Public entry to the interruption path (Escape). Aborts the orchestrator
+   * turn, cancels the TTS context, and drops in-flight audio.
+   */
+  interrupt(): void {
+    this.handleInterruption();
   }
 
   getVoiceState(): CartesiaVoiceState {
@@ -363,7 +387,7 @@ export class CartesiaRealtimeVoiceManager extends EventEmitter {
   }
 
   handleAudioChunk(base64PCM: string) {
-    if (this.isMuted) return;
+    if (!this.isListening) return;
     const buffer = Buffer.from(base64PCM, 'base64');
     this.stt.sendAudioChunk(buffer);
   }

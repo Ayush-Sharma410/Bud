@@ -36,8 +36,6 @@ export interface ExcalidrawSettings {
 export interface AppSettings {
   /** Chat/voice LLM model name (env OPENAI_MODEL overrides). */
   model: string;
-  /** Accelerator that toggles mute. */
-  muteHotkey: string;
   /** Excalidraw canvas config. */
   excalidraw: ExcalidrawSettings;
 }
@@ -72,7 +70,6 @@ export class SettingsManager {
   private defaults(): AppSettings {
     return {
       model: process.env.OPENAI_MODEL || 'gpt-5.1',
-      muteHotkey: 'CommandOrControl+Alt+M',
       excalidraw: DEFAULT_EXCALIDRAW_SETTINGS,
     };
   }

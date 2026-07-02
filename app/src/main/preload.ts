@@ -65,8 +65,8 @@ contextBridge.exposeInMainWorld('budAPI', {
   onCartesiaStopCapture: (callback: () => void) => {
     ipcRenderer.on('cartesia-stop-capture', callback);
   },
-  onCartesiaMute: (callback: (muted: boolean) => void) => {
-    ipcRenderer.on('cartesia-mute', (_event, muted) => callback(muted));
+  onVoiceMode: (callback: (mode: string) => void) => {
+    ipcRenderer.on('voice-mode', (_event, mode) => callback(mode));
   },
   onCartesiaTTSAudio: (callback: (event: { contextId: string; base64Audio: string; done: boolean }) => void) => {
     ipcRenderer.on('cartesia-tts-audio', (_event, event) => callback(event));
@@ -133,7 +133,6 @@ contextBridge.exposeInMainWorld('budAPI', {
   },
 
   // --- Realtime Voice ---
-  toggleRealtimeMute: () => ipcRenderer.invoke('toggle-realtime-mute'),
   getRealtimeState: () => ipcRenderer.invoke('get-realtime-state'),
   sendRealtimeContext: (text?: string, images?: Array<{ dataUrl: string; mediaType: string }>) =>
     ipcRenderer.send('send-realtime-context', { text, images }),
@@ -162,9 +161,6 @@ contextBridge.exposeInMainWorld('budAPI', {
   },
   onRealtimeToolRetry: (callback: (data: any) => void) => {
     ipcRenderer.on('realtime-tool-retry', (_event, data) => callback(data));
-  },
-  onMuteStateChange: (callback: (muted: boolean) => void) => {
-    ipcRenderer.on('mute-state', (_event, muted) => callback(muted));
   },
   onInterruption: (callback: () => void) => {
     ipcRenderer.on('interruption', callback);

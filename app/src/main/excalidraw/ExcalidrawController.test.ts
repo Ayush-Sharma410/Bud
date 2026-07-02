@@ -96,25 +96,16 @@ function makeScene(): import('./excalidrawTypes').SceneSummary {
     if (sentHUD?.state !== 'listening') throw new Error('HUD payload not sent');
   });
 
-  await test('startSession unmutes when muted and restores mute on end', async () => {
+  await test('endSession clears active state and returns HUD to idle', async () => {
     const wm = new ExcalidrawWindowManager();
     wm.openOrFocus = async () => wm.getWindow() as any;
-    let muted = true;
-    const controller = new ExcalidrawController({
-      windowManager: wm,
-      getMuted: () => muted,
-      toggleMute: () => {
-        muted = !muted;
-        return muted;
-      },
-    });
+    const controller = new ExcalidrawController({ windowManager: wm });
 
     await controller.startSession();
-    if (muted) throw new Error('did not unmute on start');
     if (!controller.getSessionState().isActive) throw new Error('session not active');
+    if (controller.getSessionState().hudState !== 'listening') throw new Error('HUD not listening');
 
     await controller.endSession();
-    if (!muted) throw new Error('did not restore mute on end');
     if (controller.getSessionState().isActive) throw new Error('session still active');
     if (controller.getSessionState().hudState !== 'idle') throw new Error('HUD not idle');
   });

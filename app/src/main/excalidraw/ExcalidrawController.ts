@@ -42,10 +42,6 @@ export interface ExcalidrawControllerOptions {
   sessionStore?: SessionStore;
   /** Autosave interval in milliseconds. Falls back to settings or 5000. */
   autosaveIntervalMs?: number;
-  /** Callback that returns whether the realtime voice pipeline is currently muted. */
-  getMuted?: () => boolean;
-  /** Callback that toggles realtime mute. Should return the new muted state. */
-  toggleMute?: () => boolean;
   /** Callback that returns the current app settings. Used for safety thresholds. */
   getSettings?: () => AppSettings;
   timeoutMs?: number;
@@ -94,10 +90,11 @@ interface PendingRedo extends PendingUndo {}
  * - Cache the latest scene summary published by the renderer.
  *
  * S2 responsibilities:
- * - Toggle a canvas-scoped continuous voice session on the configured hotkey.
- * - Open/focus the canvas on start, unmute Realtime if muted, restore mute on end.
- * - Keep the canvas window open when the session ends.
+ * - Toggle a canvas-scoped voice session on the configured hotkey.
+ * - Open/focus the canvas on start; keep the canvas window open when the session ends.
  * - Publish a minimal HUD state to the renderer.
+ * - Note: voice listening (mic on/off) is controlled by VoiceInputManager
+ *   (PTT / always-on / Escape), not by the canvas session.
  *
  * S3 responsibilities:
  * - Apply small, safe Excalidraw mutations immediately through `applyOperation`.
@@ -113,8 +110,6 @@ interface PendingRedo extends PendingUndo {}
  */
 export class ExcalidrawController {
   private windowManager: ExcalidrawWindowManager;
-  private getMuted?: () => boolean;
-  private toggleMute?: () => boolean;
   private getSettings?: () => AppSettings;
   private timeoutMs: number;
   private pendingScenes = new Map<string, PendingScene>();
@@ -140,7 +135,6 @@ export class ExcalidrawController {
   // S2 session state
   private isSessionActive = false;
   private sessionStartedAt?: number;
-  private restoredMuteState = false;
   private hudState: CanvasHUDState = 'idle';
 
   // S4 in-memory proposal store (local-only for this slice)
@@ -151,8 +145,6 @@ export class ExcalidrawController {
   constructor(options: ExcalidrawControllerOptions) {
     this.windowManager = options.windowManager;
     this.sessionStore = options.sessionStore;
-    this.getMuted = options.getMuted;
-    this.toggleMute = options.toggleMute;
     this.getSettings = options.getSettings;
     this.timeoutMs = options.timeoutMs ?? 5000;
     this.autosaveIntervalMs = options.autosaveIntervalMs ?? this.getExcalidrawSettings().autosaveIntervalMs;
@@ -922,26 +914,15 @@ export class ExcalidrawController {
     return this.isSessionActive;
   }
 
-  /** Open/focus the canvas and start a continuous voice session scoped to it. */
+  /** Open/focus the canvas and start a canvas voice session. */
   async startSession(): Promise<void> {
     await this.openCanvas();
 
     this.isSessionActive = true;
     this.sessionStartedAt = Date.now();
 
-    if (!this.getMuted || !this.toggleMute) {
-      console.warn('⚠️ Excalidraw voice session started without realtime mute callbacks — canvas will not control listening state');
-      this.restoredMuteState = false;
-    } else {
-      const currentlyMuted = this.getMuted();
-      if (currentlyMuted) {
-        this.restoredMuteState = true;
-        this.toggleMute();
-        console.log('🎙️ Excalidraw voice session unmuted Realtime');
-      } else {
-        this.restoredMuteState = false;
-      }
-    }
+    // Voice listening is controlled by VoiceInputManager (PTT / always-on),
+    // not by the canvas session, so there is no mute state to restore here.
 
     this.setHUDState('listening');
     console.log('🎨 Excalidraw voice session started');
@@ -949,20 +930,10 @@ export class ExcalidrawController {
 
   /**
    * End the canvas voice session while keeping the canvas window and sketch open.
-   * Restores the mute state if the session had to unmute Realtime.
    */
   async endSession(): Promise<void> {
     this.isSessionActive = false;
     this.sessionStartedAt = undefined;
-
-    if (this.restoredMuteState && this.getMuted && this.toggleMute) {
-      const currentlyMuted = this.getMuted();
-      if (!currentlyMuted) {
-        this.toggleMute();
-        console.log('🎙️ Excalidraw voice session restored Realtime mute');
-      }
-    }
-    this.restoredMuteState = false;
 
     this.setHUDState('idle');
     console.log('🎨 Excalidraw voice session ended');

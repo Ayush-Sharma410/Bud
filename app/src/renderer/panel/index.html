@@ -123,14 +123,6 @@
       opacity: 1;
     }
 
-    .main-pill.state-muted {
-      border-color: rgba(248, 113, 113, 0.25);
-    }
-    .main-pill.state-muted::after {
-      background: radial-gradient(ellipse at 20% 50%, rgba(248, 113, 113, 0.03) 0%, transparent 70%);
-      opacity: 1;
-    }
-
     .main-pill.state-fallback {
       border-color: rgba(250, 204, 21, 0.3);
     }
@@ -1020,6 +1012,7 @@
 
     let isExpanded = false;
     let voiceState = 'idle';
+    let voiceMode = 'idle';
     let stagedFiles = [];
     let waveRafId = null;
     let waveActive = false;
@@ -1129,22 +1122,31 @@
 
     const stateLabels = {
       'idle': '', 'listening': 'Listening', 'speech-detected': 'Listening',
-      'processing': 'Thinking', 'responding': 'Speaking', 'muted': 'Muted', 'fallback': 'Fallback'
+      'processing': 'Thinking', 'responding': 'Speaking', 'fallback': 'Fallback'
     };
 
     const stateColors = {
       'idle': 'var(--green)', 'listening': 'var(--rose)', 'speech-detected': 'var(--rose)',
       'processing': 'var(--amber)', 'responding': 'var(--indigo)',
-      'muted': 'var(--red)', 'fallback': 'var(--yellow)'
+      'fallback': 'var(--yellow)'
     };
 
     const cssStateMap = {
       'speech-detected': 'listening'
     };
 
+    const modeLabels = { 'ptt': 'PTT', 'always-on': 'Always-on', 'idle': '' };
+
+    function setMode(mode) {
+      voiceMode = mode;
+      setState(voiceState);
+    }
+
     function setState(state) {
       voiceState = state;
-      label.textContent = stateLabels[state] || state;
+      const modeText = modeLabels[voiceMode] || '';
+      const activityText = stateLabels[state] || '';
+      label.textContent = [modeText, activityText].filter(Boolean).join(' · ');
 
       mainPill.className = 'main-pill';
       const cssState = cssStateMap[state] || state;
@@ -1442,6 +1444,7 @@
       window.budAPI.getChatHistory().then(renderHistory);
       window.budAPI.onChatHistoryUpdated(renderHistory);
       window.budAPI.onStateChange(setState);
+      window.budAPI.onVoiceMode(setMode);
 
       let firstChunk = true;
       let replyBuf = '';
@@ -1508,10 +1511,6 @@
 
       window.budAPI.onRealtimeToolRetry((data) => {
         addMsg('system', `↻ retrying ${data.name || data.id} (attempt ${data.attempt})`);
-      });
-
-      window.budAPI.onMuteStateChange((muted) => {
-        addMsg('system', muted ? 'Microphone muted' : 'Microphone unmuted');
       });
 
       window.budAPI.onInterruption(() => {

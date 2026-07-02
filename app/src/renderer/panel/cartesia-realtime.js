@@ -12,7 +12,6 @@
   let workletNode = null;
   let mediaSource = null;
   let isCapturing = false;
-  let isMuted = false;
 
   let audioQueue = [];
   let nextStartTime = 0;
@@ -82,7 +81,6 @@
       let chunkBuffer = new Int16Array(0);
 
       workletNode.port.onmessage = (e) => {
-        if (isMuted) return;
         const pcm16 = new Int16Array(e.data);
         chunkBuffer = concatInt16(chunkBuffer, pcm16);
 
@@ -121,15 +119,22 @@
       audioCtx = null;
     }
 
-    console.log('[CartesiaRealtime] Capture stopped');
+    // Fully release the mic device so the OS indicator turns off at idle.
+    releaseMic();
+
+    console.log('[CartesiaRealtime] Capture stopped + mic released');
   }
 
-  function setMuted(muted) {
-    isMuted = muted;
+  function releaseMic() {
     if (micStream) {
       micStream.getAudioTracks().forEach((track) => {
-        track.enabled = !muted;
+        try {
+          track.stop();
+        } catch {
+          // ignore
+        }
       });
+      micStream = null;
     }
   }
 
@@ -227,7 +232,6 @@
   if (window.budAPI) {
     window.budAPI.onCartesiaStartCapture?.(() => startCapture());
     window.budAPI.onCartesiaStopCapture?.(() => stopCapture());
-    window.budAPI.onCartesiaMute?.((muted) => setMuted(muted));
     window.budAPI.onCartesiaTTSAudio?.((event) => handleAudioEvent(event));
     window.budAPI.onCartesiaTTSStop?.(() => stopPlayback());
   }
@@ -236,7 +240,6 @@
   window.cartesiaRealtime = {
     startCapture,
     stopCapture,
-    setMuted,
     stopPlayback,
   };
 })();

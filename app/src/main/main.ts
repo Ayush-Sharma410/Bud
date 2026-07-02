@@ -46,6 +46,7 @@ loadEnv();
 
 import { TrayManager } from './tray';
 import { GlobalHotkey } from './globalHotkey';
+import { VoiceInputManager } from './voiceInputManager';
 import { bus } from './bus';
 import { SettingsManager } from './settings';
 import { OrchestratorAgent, ORCHESTRATOR_SYSTEM_PROMPT } from './orchestrator';
@@ -81,6 +82,7 @@ app.setLoginItemSettings({ openAtLogin: false });
 let trayManager: TrayManager;
 let panelWindow: BrowserWindow | null = null;
 let globalHotkey: GlobalHotkey;
+let voiceInputManager: VoiceInputManager | undefined;
 let settingsManager: SettingsManager;
 let realtimeVoiceManager: CartesiaRealtimeVoiceManager | undefined;
 let chatOrchestrator: OrchestratorAgent;
@@ -139,8 +141,6 @@ app.whenReady().then(async () => {
   excalidrawWindowManager = new ExcalidrawWindowManager();
   excalidrawController = new ExcalidrawController({
     windowManager: excalidrawWindowManager,
-    getMuted: () => realtimeVoiceManager?.getMuted() ?? false,
-    toggleMute: () => realtimeVoiceManager?.toggleMute() ?? false,
   });
 
   ipcMain.on('canvas:scene-response', (_event, response: CanvasSceneResponse) => {
@@ -215,27 +215,21 @@ app.whenReady().then(async () => {
     system: ORCHESTRATOR_SYSTEM_PROMPT,
   });
 
-  // 6. Global hotkeys (canvas toggle + mute)
+  // 6. Global hotkey (canvas toggle). Voice input modes (PTT / always-on /
+  //    Escape) are driven by VoiceInputManager via a native keyboard hook.
   globalHotkey = new GlobalHotkey({
     onCanvasToggle: () => {
       excalidrawController.toggleSession().catch((err) => {
         console.error('⚠️ Excalidraw session toggle failed:', err);
       });
     },
-    onMuteToggle: () => {
-      if (realtimeVoiceManager) {
-        const isMuted = realtimeVoiceManager.toggleMute();
-        console.log(`🎙️ Mute toggled: ${isMuted ? 'muted' : 'unmuted'}`);
-      }
-    },
     canvasToggleAccelerator: currentSettings.excalidraw.toggleHotkey,
-    muteToggleAccelerator: currentSettings.muteHotkey,
   });
 
   // 7. Spawn the Floating Pill panel on startup
   togglePanel();
 
-  // 8. Register the four tools with the voice manager
+  // 8. Register the four tools with the voice manager + wire voice input modes
   if (realtimeVoiceManager) {
     const excalidrawTools = createExcalidrawTools(excalidrawController);
     const toolExecutors: ToolExecutor[] = [
@@ -246,9 +240,17 @@ app.whenReady().then(async () => {
     ];
     realtimeVoiceManager.registerTools(toolExecutors);
     console.log('🚀 Voice tools registered — Cartesia connect will fire when panel is ready');
+
+    // 8b. Voice input modes: hold Ctrl+Alt (PTT), Ctrl x3 (always-on), Esc (exit).
+    voiceInputManager = new VoiceInputManager({
+      onEnterListening: () => realtimeVoiceManager?.setListening(true),
+      onExitListening: () => realtimeVoiceManager?.setListening(false),
+      onInterrupt: () => realtimeVoiceManager?.interrupt(),
+      onModeChange: (mode) => sendToPanel('voice-mode', mode),
+    });
   }
 
-  console.log('Bud ready. Press Ctrl/Cmd+Shift+Space to toggle the canvas voice session.');
+  console.log('Bud ready. Hold Ctrl+Alt to talk, Ctrl x3 for always-on, Esc to exit. Ctrl/Cmd+Shift+Space toggles the canvas.');
 });
 
 app.on('window-all-closed', () => {
@@ -256,6 +258,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  voiceInputManager?.destroy();
   realtimeVoiceManager?.destroy();
   excalidrawController?.dispose();
   excalidrawWindowManager?.destroy();
@@ -307,9 +310,10 @@ function togglePanel() {
 
   panelWindow.once('ready-to-show', () => {
     panelWindow?.show();
-    panelWindow?.webContents.send('start-realtime-capture');
+    // Do NOT auto-start mic capture here — Bud is idle by default. Capture is
+    // driven by VoiceInputManager (PTT / always-on) via setListening().
     if (realtimeVoiceManager) {
-      console.log('🔌 Panel ready — starting Cartesia connect');
+      console.log('🔌 Panel ready — connecting Cartesia STT/TTS');
       realtimeVoiceManager.start();
     }
   });
@@ -530,22 +534,16 @@ ipcMain.handle('set-model', (_event, model: string) => {
 });
 ipcMain.handle('toggle-cursor', () => settingsManager.getSettings());
 
-ipcMain.handle('toggle-realtime-mute', () => {
-  if (realtimeVoiceManager) {
-    return { muted: realtimeVoiceManager.toggleMute() };
-  }
-  return { muted: false, error: 'Realtime not available' };
-});
-
 ipcMain.handle('get-realtime-state', () => {
   if (realtimeVoiceManager) {
     return {
       voiceState: realtimeVoiceManager.getVoiceState(),
-      muted: realtimeVoiceManager.getMuted(),
+      listening: realtimeVoiceManager.getListening(),
+      voiceMode: voiceInputManager?.getMode() ?? 'idle',
       connected: realtimeVoiceManager.isConnected(),
     };
   }
-  return { voiceState: 'idle', muted: false, connected: false };
+  return { voiceState: 'idle', listening: false, voiceMode: 'idle', connected: false };
 });
 
 // --- Background Agent Task IPC ---

@@ -1,33 +1,27 @@
 /**
  * Bud — Global Hotkey Manager
  *
- * Cross-platform (Windows, macOS, Linux) via Electron's globalShortcut.
- * Registers the canvas voice-session toggle and the mute toggle.
+ * Registers the Excalidraw canvas-session toggle via Electron's `globalShortcut`.
+ * The voice input modes (push-to-talk / always-on / Escape) are handled by
+ * `VoiceInputManager` using a native keyboard hook, not here — `globalShortcut`
+ * cannot detect key release or bare modifiers.
  */
 import { globalShortcut } from 'electron';
 
 interface GlobalHotkeyOptions {
   /** Called when the canvas voice-session toggle hotkey is pressed. */
   onCanvasToggle: () => void;
-  /** Called when the mute toggle hotkey is pressed. */
-  onMuteToggle: () => void;
   /** Accelerator for the canvas toggle. Default: CommandOrControl+Shift+Space. */
   canvasToggleAccelerator?: string;
-  /** Accelerator for the mute toggle. Default: CommandOrControl+Alt+M. */
-  muteToggleAccelerator?: string;
 }
 
 export class GlobalHotkey {
   private canvasToggleAccelerator: string;
-  private muteToggleAccelerator: string;
   private onCanvasToggle: () => void;
-  private onMuteToggle: () => void;
 
   constructor(options: GlobalHotkeyOptions) {
     this.onCanvasToggle = options.onCanvasToggle;
-    this.onMuteToggle = options.onMuteToggle;
     this.canvasToggleAccelerator = options.canvasToggleAccelerator || 'CommandOrControl+Shift+Space';
-    this.muteToggleAccelerator = options.muteToggleAccelerator || 'CommandOrControl+Alt+M';
     this.register();
   }
 
@@ -39,13 +33,6 @@ export class GlobalHotkey {
       );
     } else {
       console.log(`🎨 Canvas toggle hotkey registered: ${this.canvasToggleAccelerator}`);
-    }
-
-    const muteOk = globalShortcut.register(this.muteToggleAccelerator, () => this.onMuteToggle());
-    if (!muteOk) {
-      console.warn(`⚠️ Failed to register mute hotkey: ${this.muteToggleAccelerator}.`);
-    } else {
-      console.log(`🔇 Mute toggle hotkey registered: ${this.muteToggleAccelerator}`);
     }
   }
 
@@ -66,6 +53,5 @@ export class GlobalHotkey {
 
   destroy() {
     try { globalShortcut.unregister(this.canvasToggleAccelerator); } catch { /* not registered */ }
-    try { globalShortcut.unregister(this.muteToggleAccelerator); } catch { /* not registered */ }
   }
 }

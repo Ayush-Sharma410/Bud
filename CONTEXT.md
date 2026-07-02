@@ -13,7 +13,7 @@ The primary work surface — an embedded instance of the official `@excalidraw/e
 _Avoid_: whiteboard, drawing board, canvas window
 
 **Floating Pill**:
-The collapsed, always-on-top, minimal black bar at the top-center of the screen. Indicates the active mode (listening, speaking, muted, fallback) and expands into the Chat Agent Panel when clicked.
+The collapsed, always-on-top, minimal black bar at the top-center of the screen. Indicates the active mode (idle, listening, speaking, fallback) and the voice input mode (PTT / always-on), and expands into the Chat Agent Panel when clicked.
 _Avoid_: status bar, system island, floating notch
 
 **Chat Agent Panel**:
@@ -53,16 +53,16 @@ An async background worker tool (`spawnAgent`, renamed from `spawnWorker`) that 
 _Avoid_: worker, subprocess, background job
 
 **Tray**:
-The system tray icon and menu (`TrayManager`) that shows status, toggles mute, opens settings, and quits. Cross-platform via Electron's `Tray` API.
+The system tray icon and menu (`TrayManager`) that shows the panel and quits. Cross-platform via Electron's `Tray` API.
 _Avoid_: system tray icon, menu bar item
 
 **Global Hotkey**:
-The global keyboard shortcut (default Ctrl+Alt+M / Cmd+Alt+M) that toggles the microphone on and off. Implemented via Electron's `globalShortcut` — no native hook library. When muted, audio is not captured and the Floating Pill shows a red border with "Muted".
+The global keyboard shortcut (default Ctrl/Cmd+Shift+Space) that toggles the Excalidraw canvas voice session. Implemented via Electron's `globalShortcut`.
 _Avoid_: hotkey, shortcut, keyboard shortcut
 
-**Mute Toggle**:
-The act of toggling the microphone via the Global Hotkey or tray menu. When muted, the Floating Pill shows a red border with "Muted".
-_Avoid_: mute button, mic toggle
+**Voice Input Modes**:
+The two ways the user activates the microphone, driven by `VoiceInputManager` over a native global keyboard hook (`uiohook-napi`) that tracks press + release system-wide (Electron's `globalShortcut` cannot). **Push-to-talk**: hold Ctrl+Alt to listen, release to stop. **Always-on**: press bare Ctrl three times within ~1.2s to listen continuously; press Escape to exit and interrupt any in-progress response. Bud defaults to **idle** (mic released, OS indicator off) at startup; STT/TTS WebSockets stay connected across mode switches and only the PCM flow is gated. The old mute hotkey is retired — the two modes supersede it.
+_Avoid_: mute, mic toggle, push-to-talk shortcut
 
 **Settings**:
 A self-contained settings model (`SettingsManager`) persisted to JSON. Holds only `model`, `muteHotkey`, and `excalidraw` config. Voice (Cartesia) and LLM credentials are read from environment variables, not settings.
@@ -75,7 +75,7 @@ _Avoid_: session, conversation, request
 ## Architecture
 
 **Voice Loop**:
-Microphone `getUserMedia` (renderer) → audio chunks streamed to main process → Cartesia STT WebSocket → final transcript → Orchestrator (`OrchestratorAgent`) reasons + calls tools → streams text response → Cartesia TTS WebSocket plays audio back. Interruption: when STT detects speech during TTS playback, playback is cancelled and the new utterance takes over.
+Microphone `getUserMedia` (renderer) → audio chunks streamed to main process → Cartesia STT WebSocket → final transcript → Orchestrator (`OrchestratorAgent`) reasons + calls tools → streams text response → Cartesia TTS WebSocket plays audio back. The mic is off by default (idle); `VoiceInputManager` gates capture + PCM forwarding on the active input mode (PTT hold / always-on). Interruption: when STT detects speech during TTS playback, playback is cancelled and the new utterance takes over.
 
 **Excalidraw Embedding**:
 The official `@excalidraw/excalidraw` React component is bundled by Vite (`vite.canvas.config.ts`) into static assets loaded by a dedicated BrowserWindow. A preload script (`canvasPreload.ts`) exposes a narrow, validated IPC API; the main-process `ExcalidrawController` calls through it to read scene state and apply mutations. Fonts and assets are self-hosted via `window.EXCALIDRAW_ASSET_PATH` — no CDN dependency.
@@ -84,4 +84,4 @@ The official `@excalidraw/excalidraw` React component is bundled by Vite (`vite.
 All four tools implement a common async executor interface. The Orchestrator calls them via `ToolExecutor`; results pass through `ToolResultEnricher` (a pure normalizer — no image processing) before returning to the model. Spawn Agent workers run their own `OrchestratorAgent` loop with the reduced toolset and report progress over the worker event bus.
 
 **Cross-Platform**:
-Electron renderer + main process run identically on Windows, macOS, and Linux. The only platform-specific bits are the global hotkey default (Ctrl vs Cmd), tray icon format, and native module rebuild (`better-sqlite3`) handled by `electron-builder install-app-deps` on `postinstall`. No platform-specific input automation, screen capture, or overlay code remains.
+Electron renderer + main process run identically on Windows, macOS, and Linux. The only platform-specific bits are the global hotkey default (Ctrl vs Cmd), tray icon format, and native module rebuild (`better-sqlite3`, `uiohook-napi`) handled by `electron-builder install-app-deps` on `postinstall`. `uiohook-napi` provides the global keyboard hook for the Voice Input Modes (press + release + bare-modifier detection that `globalShortcut` cannot); it is observe-only and ships per-platform prebuilds. No platform-specific screen capture or overlay code remains.
