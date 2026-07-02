@@ -13,9 +13,8 @@
  */
 
 import { streamText, stepCountIs } from 'ai';
+import { openai } from '@ai-sdk/openai';
 import {
-  createLanguageModel,
-  CreateLanguageModelOptions,
   getDefaultOrchestratorModelName,
   getDefaultPreambleModelName,
 } from '../llmProvider';
@@ -40,8 +39,6 @@ export interface OrchestratorAgentOptions {
   maxSteps?: number;
   /** Max retries for transient tool errors. */
   maxRetries?: number;
-  /** Optional base URL override. */
-  baseURL?: string;
 }
 
 export interface RunOptions {
@@ -63,7 +60,6 @@ export class OrchestratorAgent {
   private preambleSystem: string;
   private maxSteps: number;
   private maxRetries: number;
-  private baseURL?: string;
   private history: any[] = [];
   private eventBus = new OrchestratorEventBus();
   private running = false;
@@ -76,7 +72,6 @@ export class OrchestratorAgent {
     this.preambleSystem = options.preambleSystem || PREAMBLE_SYSTEM_PROMPT;
     this.maxSteps = options.maxSteps ?? 30;
     this.maxRetries = options.maxRetries ?? 3;
-    this.baseURL = options.baseURL;
   }
 
   /** Expose the event bus so consumers can subscribe to reasoning/tool/text events. */
@@ -113,9 +108,6 @@ export class OrchestratorAgent {
     const signal = options.signal;
 
     try {
-      const modelOptions: CreateLanguageModelOptions = {};
-      if (this.baseURL) modelOptions.baseURL = this.baseURL;
-
       // Decision from the preamble stream, resolved once we've seen the marker.
       type PreambleDecision =
         | { kind: 'reply'; text: string }
@@ -125,7 +117,7 @@ export class OrchestratorAgent {
       const preambleDecision = new Promise<PreambleDecision>(async (resolve) => {
         const preambleMessages = this.history.slice(-2);
         const preambleResult = streamText({
-          model: createLanguageModel(this.preambleModel),
+          model: openai(this.preambleModel),
           system: this.preambleSystem,
           messages: preambleMessages,
           tools: {},
@@ -197,7 +189,7 @@ export class OrchestratorAgent {
 
       // --- Complex call (gpt-5.1, tools, multi-step loop) ---
       const result = streamText({
-        model: createLanguageModel(this.model, modelOptions),
+        model: openai(this.model),
         system: this.system,
         messages: this.history,
         tools: this.tools,
@@ -209,14 +201,14 @@ export class OrchestratorAgent {
             this.eventBus.emit('toolCall', {
               id: tc.toolCallId,
               name: tc.toolName,
-              input: tc.args,
+              input: tc.input,
             });
             toolCallMap.set(tc.toolCallId, tc.toolName);
           }
 
           for (const tr of toolResults as any[]) {
             const toolName = toolCallMap.get(tr.toolCallId) || 'unknown';
-            const enriched = await enrichToolResult(toolName, tr.result);
+            const enriched = await enrichToolResult(toolName, tr.output);
             this.eventBus.emit('toolResult', {
               id: tr.toolCallId,
               success: enriched.success,
@@ -278,7 +270,7 @@ export class OrchestratorAgent {
     }
   }
 
-  private trimHistory(maxMessages = 40) {
+  private trimHistory(maxMessages = 10) {
     if (this.history.length > maxMessages) {
       // Keep system/first user message context if present, else just slide the window.
       const keepFirst = this.history.length > 0 && this.history[0].role === 'system' ? 1 : 0;
